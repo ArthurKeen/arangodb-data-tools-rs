@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arangodb-tools-core",
+    "crates/arangodb-client",
+    "crates/arangodb-storage",
+    "crates/arangodb-import",
+    "crates/arangodb-export",
+    "crates/arangodb-dump",
+    "crates/arangodb-restore",
+    "crates/arangodb-rdf",
+    "crates/arangodb-tools-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+authors = ["Arthur Keen"]
+repository = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
+homepage = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
+readme = "README.md"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Shared dependency versions are declared here and referenced from member
+# crates with `dep.workspace = true` as they are introduced per the
+# implementation plan.
+[workspace.dependencies]

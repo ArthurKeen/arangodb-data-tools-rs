@@ -1,0 +1,19 @@
+[package]
+name = "arangodb-import"
+description = "Bulk import of CSV, TSV, JSON, and JSONL data into ArangoDB."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arangodb-tools-core = { path = "../arangodb-tools-core" }
+arangodb-client = { path = "../arangodb-client" }
+arangodb-storage = { path = "../arangodb-storage" }

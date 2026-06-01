@@ -1,0 +1,17 @@
+[package]
+name = "arangodb-storage"
+description = "Pluggable object/file storage abstraction (local FS, S3, GCS, Azure, SeaweedFS) with streaming I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arangodb-tools-core = { path = "../arangodb-tools-core" }

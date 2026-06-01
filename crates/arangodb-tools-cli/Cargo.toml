@@ -1,0 +1,28 @@
+[package]
+name = "arangodb-tools-cli"
+description = "Command-line tools (arangox-*) for ArangoDB import, export, dump, restore, and RDF workflows."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "arangox"
+path = "src/main.rs"
+
+[dependencies]
+arangodb-tools-core = { path = "../arangodb-tools-core" }
+arangodb-client = { path = "../arangodb-client" }
+arangodb-storage = { path = "../arangodb-storage" }
+arangodb-import = { path = "../arangodb-import" }
+arangodb-export = { path = "../arangodb-export" }
+arangodb-dump = { path = "../arangodb-dump" }
+arangodb-restore = { path = "../arangodb-restore" }
+arangodb-rdf = { path = "../arangodb-rdf" }

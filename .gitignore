@@ -1,0 +1,24 @@
+# Rust / Cargo
+/target
+**/target
+**/*.rs.bk
+*.pdb
+# Cargo.lock is intentionally tracked because this workspace ships a binary (the CLI).
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Test / scratch output
+/tmp
+/dump
+/scratch
