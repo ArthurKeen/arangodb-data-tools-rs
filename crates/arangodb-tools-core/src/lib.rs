@@ -1,6 +1,24 @@
 //! Shared foundations for the ArangoDB data tools.
 //!
-//! This crate will hold the error taxonomy, retry policy, bounded-pipeline and
-//! work-queue concurrency primitives, the progress-event schema, shared
-//! configuration types, and the canonical manifest model. See
-//! `docs/IMPLEMENTATION_PLAN.md` (section 3) for the planned contents.
+//! This crate holds the cross-cutting building blocks used by every other
+//! crate in the workspace:
+//!
+//! - [`error`]: the error taxonomy and rich error context.
+//! - [`retry`]: retry classification and a backoff-driven retry helper.
+//! - [`config`]: shared connection, TLS, batching, and concurrency config.
+//! - [`progress`]: the progress-event schema and counters.
+//! - [`manifest`]: the canonical dump/export manifest model.
+//! - [`redact`]: the [`Secret`] wrapper for credentials.
+//!
+//! See `docs/IMPLEMENTATION_PLAN.md` (section 3) for the broader design.
+
+pub mod config;
+pub mod error;
+pub mod manifest;
+pub mod progress;
+pub mod redact;
+pub mod retry;
+
+pub use error::{Error, ErrorContext, Result};
+pub use redact::Secret;
+pub use retry::{retry, RetryPolicy, Retryable};

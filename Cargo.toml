@@ -34,3 +34,12 @@ all = { level = "warn", priority = -1 }
 # crates with `dep.workspace = true` as they are introduced per the
 # implementation plan.
 [workspace.dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tokio = { version = "1", default-features = false }
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
