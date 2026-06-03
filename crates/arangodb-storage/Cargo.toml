@@ -15,3 +15,12 @@ workspace = true
 
 [dependencies]
 arangodb-tools-core = { path = "../arangodb-tools-core" }
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+tempfile = "3"

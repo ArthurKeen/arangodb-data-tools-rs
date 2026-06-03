@@ -1,6 +1,15 @@
 //! Storage abstraction for the ArangoDB data tools.
 //!
-//! Defines the `ObjectStore` trait and backends (local filesystem first, then
-//! S3-compatible, GCS, Azure, and SeaweedFS) plus storage-URI parsing and
-//! streaming read/write. See `docs/IMPLEMENTATION_PLAN.md` (section 4, phases
-//! 2 and 7) for the planned backends.
+//! Nothing above this crate should care whether bytes live on a local disk or
+//! in an object store. The [`ObjectStore`] trait defines streaming
+//! read/write/list/delete operations; [`LocalFileSystem`] is the first
+//! backend. Object-storage backends (S3, GCS, Azure, SeaweedFS) are added in
+//! later phases per `docs/IMPLEMENTATION_PLAN.md`.
+
+pub mod local;
+pub mod store;
+pub mod uri;
+
+pub use local::LocalFileSystem;
+pub use store::{ByteRange, ByteStream, ObjectMetadata, ObjectPath, ObjectStore};
+pub use uri::{StorageScheme, StorageUri};
