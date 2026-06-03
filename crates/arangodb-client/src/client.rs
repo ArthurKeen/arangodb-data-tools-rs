@@ -63,34 +63,37 @@ impl ArangoClient {
     }
 
     /// Executes a request with retries, returning the response body on success.
-    async fn execute(
+    async fn execute(&self, method: Method, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>> {
+        retry(&self.retry, || self.send_request(&method, path, body)).await
+    }
+
+    /// Performs a single HTTP request attempt.
+    async fn send_request(
         &self,
-        method: Method,
+        method: &Method,
         path: &str,
         body: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
-        retry(&self.retry, || async {
-            let url = self.url_for(path)?;
-            let mut request = self.apply_auth(self.http.request(method.clone(), url));
-            if let Some(payload) = body {
-                request = request
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .body(payload.to_vec());
-            }
+        let url = self.url_for(path)?;
+        let mut request = self.apply_auth(self.http.request(method.clone(), url));
+        if let Some(payload) = body {
+            request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
+            request = request.body(payload.to_vec());
+        }
 
-            let response = request.send().await.map_err(map_reqwest_error)?;
-            let status = response.status();
-            let payload = response.bytes().await.map_err(map_reqwest_error)?;
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        let status = response.status();
+        let payload = response.bytes().await.map_err(map_reqwest_error)?;
 
-            if status.is_success() {
-                Ok(payload.to_vec())
-            } else {
-                let message = arango_error_message(payload.as_ref())
-                    .unwrap_or_else(|| status.to_string());
-                Err(Error::http(status.as_u16(), message, ErrorContext::new()))
-            }
-        })
-        .await
+        if status.is_success() {
+            return Ok(payload.to_vec());
+        }
+
+        let message = match arango_error_message(payload.as_ref()) {
+            Some(message) => message,
+            None => status.to_string(),
+        };
+        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
     }
 }
 
@@ -183,12 +186,9 @@ impl ArangoClientBuilder {
     /// Returns [`Error::Config`] if the endpoint URL is invalid, the CA file
     /// cannot be read, or the HTTP client cannot be constructed.
     pub fn build(self) -> Result<ArangoClient> {
-        let base = reqwest::Url::parse(&self.config.endpoint).map_err(|err| {
-            Error::config(format!(
-                "invalid endpoint '{}': {err}",
-                self.config.endpoint
-            ))
-        })?;
+        let endpoint = &self.config.endpoint;
+        let base = reqwest::Url::parse(endpoint)
+            .map_err(|err| Error::config(format!("invalid endpoint '{endpoint}': {err}")))?;
 
         let mut builder = reqwest::Client::builder()
             .connect_timeout(self.config.connect_timeout)
@@ -198,12 +198,8 @@ impl ArangoClientBuilder {
             builder = builder.danger_accept_invalid_certs(true);
         }
         if let Some(ca_file) = &self.config.tls.ca_file {
-            let pem = std::fs::read(ca_file).map_err(|err| {
-                Error::config(format!(
-                    "cannot read CA file '{}': {err}",
-                    ca_file.display()
-                ))
-            })?;
+            let pem = std::fs::read(ca_file)
+                .map_err(|err| Error::config(format!("cannot read CA file: {err}")))?;
             let certificate = reqwest::Certificate::from_pem(&pem)
                 .map_err(|err| Error::config(format!("invalid CA certificate: {err}")))?;
             builder = builder.add_root_certificate(certificate);
