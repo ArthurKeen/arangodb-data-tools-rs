@@ -78,7 +78,7 @@ Built once, used everywhere. These are Phase 0 deliverables and gate all later w
 - `retry(policy, op)` helper that consults the `Retryable` classification. Used by **all** HTTP callers (client crate enforces it so no path can skip retries).
 
 ### 3.3 Concurrency primitives
-- `BoundedPipeline` helper: typed wrapper over `mpsc` with capacity + a shared `Arc<Semaphore>` for global in-flight bytes.
+- `BoundedPipeline` helper: typed wrapper over `mpsc` with capacity + a shared `Arc<Semaphore>` for global in-flight bytes. Batch sizes are clamped to the semaphore capacity at config validation (a permit request larger than capacity can never be granted and would deadlock the pipeline).
 - `WorkQueue<J>`: the single async work-queue abstraction (replaces both the C++ `ClientTaskQueue` and the bespoke per-server thread pools). Structured `Result` propagation, cooperative cancellation via `CancellationToken`, no swallowed errors.
 
 ### 3.4 Progress & observability
@@ -92,7 +92,7 @@ Built once, used everywhere. These are Phase 0 deliverables and gate all later w
 - `Checkpoint` metadata types (used by dump/restore/import).
 
 ### 3.6 Manifest model (shared)
-- `Manifest` + `Artifact { path, kind, format, compression, byte_size, checksum }` serde types. Spec lives in `docs/dump-format.md`. Used by export, dump, restore.
+- `Manifest` + `Artifact { path, kind, format, compression, byte_size, checksum }` serde types. Both `Manifest` and `Checkpoint` carry an explicit `format_version` field from day one, with a documented evolution policy (newer readers read older dumps). Spec lives in `docs/dump-format.md`. Used by export, dump, restore.
 
 ---
 
@@ -107,7 +107,7 @@ Phases map to PRD §18 milestones but add the cross-cutting foundation and split
 - `rustfmt.toml`, `clippy.toml`, CI (fmt + clippy `-D warnings` + test) via GitHub Actions.
 - `arangodb-tools-core`: error taxonomy, retry policy, bounded pipeline, work queue, progress schema, config, manifest types, tracing setup (§3 above).
 - `arangodb-storage`: `ObjectStore` trait + local filesystem backend + URI parsing.
-- `arangodb-client`: connection/auth/TLS config, HTTP execution with enforced retry, `/_api/version`.
+- `arangodb-client`: connection/auth/TLS config (basic auth + JWT/bearer token), HTTP execution with enforced retry, `/_api/version`.
 - Docker integration harness (testcontainers or compose) for ArangoDB 3.12.
 
 **Key APIs**
@@ -115,10 +115,16 @@ Phases map to PRD §18 milestones but add the cross-cutting foundation and split
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put_stream(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata>;
+    // Create-only put for manifests/checkpoints (concurrent-writer detection).
+    async fn put_if_absent(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata>;
+    // Exposes upload id + completed parts so uploads resume across restarts.
+    async fn start_multipart(&self, path: &ObjectPath) -> Result<Box<dyn MultipartUpload>>;
     async fn get_stream(&self, path: &ObjectPath, range: Option<ByteRange>) -> Result<ByteStream>;
-    async fn list(&self, prefix: &ObjectPath) -> Result<Vec<ObjectMetadata>>;
+    // Size/etag without the body; None when absent (subsumes `exists`).
+    async fn head(&self, path: &ObjectPath) -> Result<Option<ObjectMetadata>>;
+    // Streaming/paginated; dump prefixes can hold many objects.
+    fn list(&self, prefix: &ObjectPath) -> BoxStream<'_, Result<ObjectMetadata>>;
     async fn delete(&self, path: &ObjectPath) -> Result<()>;
-    async fn exists(&self, path: &ObjectPath) -> Result<bool>;
 }
 
 let client = ArangoClient::builder().endpoint(..).database(..).basic_auth(..).build()?;
@@ -135,20 +141,24 @@ client.version().await?;
 ### Phase 1 — Import MVP (PRD Milestone 1)
 
 **Deliverables (`arangodb-import` + CLI)**
-- Streaming readers: JSONL (incremental), JSON array (incremental or documented limit), CSV/TSV.
+- Streaming readers: JSONL (incremental), JSON array (incremental, bounded memory — one top-level element at a time), CSV/TSV.
+- Input sources: file, stdin; gzip/zstd-compressed inputs selected by extension with explicit override (PRD §8.2).
 - Single unified pipeline (reader → optional transform → byte+doc batcher → sender pool) using `BoundedPipeline`. No duplicated "rewrite" path.
-- Batcher: byte cap + document cap, line-safe JSONL splitting.
+- Batcher: byte cap + document cap, line-safe JSONL splitting; batch size clamped to the in-flight-byte cap (§3.3).
 - Async sender pool over `/_api/import`; global in-flight-byte semaphore.
 - Duplicate modes (insert/update/replace/ignore/error) passed through; consistent `--max-errors` enforcement on all formats.
-- Collection/database creation; edge vs document collection; `_from`/`_to` preflight for edge collections.
+- Collection/database creation; edge vs document collection; `_from`/`_to` preflight for edge collections; `--from-collection-prefix`/`--to-collection-prefix` equivalents (preflight accepts bare keys a prefix will rewrite).
+- At-least-once delivery semantics documented, including the duplicate-mode interplay on retry/resume (PRD §8.2).
 - Overwrite semantics defined (server-side truncate-and-import or documented non-atomic behavior).
 - Structured per-batch error context; structured progress (docs/sec, ETA).
+- Benchmark harness: official `arangoimport` vs `arangox-import` on a shared JSONL fixture against the same Docker server (PRD §11.1).
 - `arangox-import` CLI.
 
 **Exit criteria**
 - Import 1M JSONL docs into Docker ArangoDB; counts verified.
 - Memory stays bounded by configured batch size × workers (assert via test with small caps + large file).
 - CSV and JSON-array imports validated; error-context surfaced on malformed input.
+- Benchmark harness runs (CI or documented manual job) and reports throughput relative to `arangoimport`; the PRD §11.1 target is measured, not assumed.
 
 ---
 
@@ -157,13 +167,15 @@ client.version().await?;
 **Deliverables (`arangodb-storage`)**
 - S3-compatible backend (evaluate `object_store` crate vs hand-rolled in a spike — see §6).
 - Streaming reads (range requests) and streaming writes (multipart upload).
+- Full trait surface implemented and reviewed against PRD §10 before this phase closes: `head` metadata, streaming/paginated `list`, `put_if_absent` (conditional put) for manifests/checkpoints, and multipart uploads whose state survives process restarts (resumable uploads). Trait gaps ripple through every later backend.
 - Object listing / prefix traversal; path validation against configured prefix.
 - Wire import to read directly from `s3://` URIs.
 
 **Exit criteria**
 - Import JSONL directly from MinIO/LocalStack.
 - Write + read-back streamed object via S3 backend in integration tests.
-- Multipart upload exercised with an object larger than one part.
+- Multipart upload exercised with an object larger than one part; resume of an interrupted multipart upload exercised.
+- `put_if_absent` conflict behavior exercised (second writer gets a clean error).
 
 ---
 
@@ -176,10 +188,12 @@ client.version().await?;
 - Streaming output pipeline: decode cursor batch incrementally, write without buffering whole batch; fetch-next overlaps write.
 - Compression (gzip; zstd via storage layer), split into multiple objects, manifest describing outputs.
 - Parallel collection export via `WorkQueue`.
+- Out of scope (deliberately): graph export and XGMML output are post-MVP (PRD §8.3).
 - `arangox-export` CLI.
 
 **Exit criteria**
 - Export collection to local and S3 storage; re-import exported JSONL and validate counts (round-trip).
+- Compressed round-trip: export gzip JSONL and re-import it directly without manual decompression (exercises PRD §8.2 compressed input).
 - Manifest correctly enumerates split parts and is consumed by a manifest-reader test.
 
 ---
@@ -188,7 +202,10 @@ client.version().await?;
 
 **Deliverables (`arangodb-dump`, `arangodb-restore` + CLIs)**
 - **Dump:** inventory retrieval; structure/index/view metadata; data via parallel `/_api/dump/*` (legacy `/_api/replication/dump` fallback); manifest as canonical output; gzip/zstd; server-handle keep-alive (TTL extension) and cleanup; per-collection/shard checkpoints for resume.
-- **Restore:** read manifest; validate compatibility before mutation; create DB/collections; **dependency ordering** (distributeShardsLike prototypes → docs → edges; `_analyzers` first; `_users` last); ordinary indexes before data, vector indexes after; arangosearch views before data, search-alias after; resumable via cheap checkpoints.
+- **Consistency model:** create the replication batch / dump context **before** reading the inventory so inventory and data reads share one snapshot; document the guarantees (single-server point-in-time vs. weaker cross-shard) in `docs/dump-format.md` (PRD §8.4).
+- **Scope guard:** single-server only this phase; detect cluster deployments and fail with a clear error rather than misbehave (PRD §8.4).
+- **Restore:** read manifest; validate compatibility before mutation; create DB/collections; **dependency ordering** (distributeShardsLike prototypes → docs → edges; `_analyzers` first; `_users` last); **configurable index ordering** relative to data, benchmarked to pick the default (reference tool verified: non-vector indexes before data, vector indexes always after data); arangosearch views before data, search-alias after (link-during-load throughput tradeoff documented); resumable via cheap checkpoints.
+- **Checkpoint location:** independently configurable; never requires write access to the (possibly read-only) dump prefix; clear error when no writable location is available (PRD §8.5).
 - Unified retry on every HTTP op in both tools.
 - `arangox-dump`, `arangox-restore` CLIs.
 
@@ -197,6 +214,8 @@ client.version().await?;
 - Same round-trip against S3 storage.
 - Kill dump mid-run → resume completes without re-fetching finished collections.
 - Kill restore mid-run → resume completes without duplicating finished collections.
+- Negative fixtures: Enterprise-encrypted (`ENCRYPTION` marker) and VelocyPack dumps refused with clear errors and no partial server mutation.
+- Index-ordering benchmark run (indexes-before vs after data) and default recorded in `docs/dump-format.md`.
 
 ---
 
@@ -205,12 +224,16 @@ client.version().await?;
 **Deliverables**
 - All-databases dump.
 - Restore continuation hardening (in-flight checkpoint accounting, contiguous-prefix advance).
+- Import resume: input-offset checkpoints for seekable/range-readable sources (PRD §10), honoring the documented at-least-once + duplicate-mode semantics (PRD §8.2).
+- Adaptive batching / rate limiting driven by server feedback — RTT and 429/503 pushback, never blocking the reader stage (PRD §11.3).
+- Restore topology overrides: `numberOfShards`/`replicationFactor` overrides, cluster-only property stripping (PRD §8.5).
 - Collection/view filters across dump/restore.
 - Refined adaptive retry/backoff.
 - Split large data files/objects with manifest-tracked parts.
 
 **Exit criteria**
 - Interrupted restore resumes without duplicating completed collections.
+- Interrupted import resumes from its checkpoint without unbounded duplication (idempotent-key fixture).
 - Large-object split restore works from S3.
 - All-databases dump/restore validated.
 
@@ -250,8 +273,10 @@ client.version().await?;
 | Integration (Docker) | connect, create, import/export, dump/restore, filters, indexes/views | Phases 1+ |
 | Storage | local (CI), S3 via MinIO/LocalStack, GCS/Azure behind flags | Phases 2, 7 |
 | Resume/chaos | kill-mid-operation tests for dump and restore | Phases 4, 5 |
-| Round-trip | export→import, dump→restore count/index equality | Phases 3, 4 |
+| Round-trip | export→import (incl. compressed), dump→restore count/index equality | Phases 3, 4 |
 | Compatibility | official `arangodump` → Rust restore (scoped subset), Rust dump → official `arangorestore` | Phases 4, 5 |
+| Negative compatibility | encrypted (`ENCRYPTION` marker) and VelocyPack dumps refused loudly, no partial mutation | Phase 4 |
+| Benchmark | `arangox-import` vs official `arangoimport` throughput on a shared fixture (PRD §11.1); index-ordering benchmark | Phases 1, 4 |
 
 **CI gates:** `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (unit), and a Docker-backed integration job. Matrix on ArangoDB 3.12 + current stable.
 
@@ -277,6 +302,8 @@ Run these as small, time-boxed spikes **before** committing the dependent phase:
 | Object-store semantics (no atomic rename) | Corrupt/partial dumps | Manifest written last; multipart completion; idempotent names |
 | Resume correctness with out-of-order async sends | Data duplication/loss | Contiguous-prefix checkpoint advance; logical-key checkpoints; chaos tests |
 | Backpressure misconfiguration | OOM or underutilization | Global in-flight-byte semaphore; bounded channels; memory-bound tests |
+| Batch larger than in-flight-byte cap | Pipeline deadlock (`acquire_many` > capacity never granted) | Clamp batch size to cap at config validation; debug assertion in `BoundedPipeline` |
+| Run against cluster topology in MVP | Silent misbehavior / inconsistent dumps | Detect deployment type; fail clearly; cluster support explicitly post-MVP |
 | Compatibility-mode scope creep | Endless edge cases | Scope to tested subset (single-server, JSONL, no encryption); document best-effort |
 | Encrypted Enterprise dumps | Silent corruption | Detect `ENCRYPTION` marker; fail loudly |
 | TLS-verify default change vs C++ | User surprise | Document behavior change; explicit `--insecure` opt-in |

@@ -22,6 +22,7 @@ The project should live in a separate repository from `arangodb/arangodb`. The A
 - Do not attempt full option-for-option CLI compatibility in the first release.
 - Do not reimplement `arangosh`, Foxx tooling, backup administration, or benchmarking.
 - Do not require a local source build of ArangoDB.
+- Do not target cluster-topology-aware dump/restore in the first release. MVP dump/restore is designed and tested against single servers; cluster support is post-MVP (see §8.4).
 - Do not rely on private server APIs unless no public alternative exists and the risk is documented.
 - Do not support Enterprise-only encryption behavior in the first release unless a compatible public format is specified.
 
@@ -147,14 +148,24 @@ Suggested traits:
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put_stream(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata>;
+    /// Create-only put (fails if the object already exists). Used for
+    /// manifests and checkpoints to detect concurrent writers.
+    async fn put_if_absent(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata>;
+    /// Multipart upload whose state (upload id, completed parts) is exposed
+    /// so uploads can resume across process restarts where the backend
+    /// supports it (required by §10).
+    async fn start_multipart(&self, path: &ObjectPath) -> Result<Box<dyn MultipartUpload>>;
     async fn get_stream(&self, path: &ObjectPath, range: Option<ByteRange>) -> Result<ByteStream>;
-    async fn list(&self, prefix: &ObjectPath) -> Result<Vec<ObjectMetadata>>;
+    /// Object metadata (size, etag/checksum) without fetching the body;
+    /// `None` when the object does not exist (subsumes a bare `exists`).
+    async fn head(&self, path: &ObjectPath) -> Result<Option<ObjectMetadata>>;
+    /// Streaming/paginated listing; dump prefixes can contain many objects.
+    fn list(&self, prefix: &ObjectPath) -> BoxStream<'_, Result<ObjectMetadata>>;
     async fn delete(&self, path: &ObjectPath) -> Result<()>;
-    async fn exists(&self, path: &ObjectPath) -> Result<bool>;
 }
 ```
 
-The final design may use the Rust `object_store` crate if it satisfies backend and streaming requirements.
+The final design may use the Rust `object_store` crate if it satisfies backend and streaming requirements. The trait must remain able to express every §10 reliability requirement (notably restart-resumable uploads and conditional puts) — gaps here ripple through every backend, so the trait is reviewed against §10 before the first cloud backend lands.
 
 ### 7.4 `arangodb-import`
 
@@ -235,12 +246,14 @@ Responsibilities:
 - Support JWT/bearer token authentication if practical.
 - Support TLS configuration, custom CA certificates, and insecure development mode.
 - Support request timeouts and retry policies.
+- Fail with a clear, actionable error when server permissions are insufficient for the requested operation (e.g. all-databases dump and `_users` restore require `_system`-level access). Where a cheap check exists, preflight permissions before starting long-running work.
 
 ### 8.2 Import
 
 - Accept input from local path, object storage URI, stdin, or stream.
 - Support CSV, TSV, JSON array, and JSONL.
 - Support automatic type inference from file extension.
+- Support reading gzip- and zstd-compressed inputs, selected by file extension (e.g. `.jsonl.gz`, `.jsonl.zst`) with an explicit override, so compressed exports produced by this project (§8.3) can be re-imported directly.
 - Support explicit collection name.
 - Support create collection and create database options.
 - Support document and edge collection creation.
@@ -253,6 +266,8 @@ Responsibilities:
 - Stream JSONL incrementally; for JSON array input, either parse incrementally or document and enforce the in-memory limitation with a clear error rather than silently buffering an oversized file.
 - Define overwrite/truncate semantics on mid-import failure. The reference C++ tool truncates non-atomically on the first batch only; the Rust implementation should either use a server-side truncate-and-import path or clearly document that a crash after truncate but before completion leaves an empty/partial collection.
 - Validate `_from`/`_to` presence as a client-side preflight when importing into an edge collection, instead of relying solely on server-side rejection.
+- Support `_from`/`_to` key-prefixing options for edge imports, equivalent to `arangoimport`'s `--from-collection-prefix`/`--to-collection-prefix`. The edge preflight must accept bare keys when a prefix option will rewrite them.
+- Import delivery semantics are at-least-once: a retried or resumed import may re-send documents from an incomplete batch. Document this, recommend deterministic `_key` strategies for idempotency, and define the interplay with duplicate modes (resuming with `onDuplicate=error` would fail spuriously on re-sent documents; resume requires an idempotent mode or documented behavior).
 
 ### 8.3 Export
 
@@ -264,6 +279,7 @@ Responsibilities:
 - Support gzip or zstd compression.
 - Support splitting large exports into multiple objects.
 - Write a manifest describing output files, format, schema hints, and source query.
+- Graph export and XGMML output (referenced in §5.2 and §7.5) are explicitly post-MVP: they are not scheduled in the MVP milestones and are tracked here so the use case is deferred deliberately rather than silently dropped.
 
 ### 8.4 Dump
 
@@ -276,11 +292,14 @@ Responsibilities:
 - Dump collection data.
 - Preserve enough metadata for restore to recreate collections faithfully.
 - Write `dump.json`-like top-level metadata for compatibility where feasible.
+- Define and document the dump consistency model. A dump must capture a stable snapshot per collection (and per shard where applicable): create the replication batch / dump context **before** reading the inventory, so the inventory and all subsequent data reads observe the same snapshot. Document exactly what is and is not guaranteed (single-server point-in-time snapshot vs. weaker cross-shard guarantees on clusters) in `docs/dump-format.md` and user-facing docs — "is my dump consistent while writes continue?" must have a written answer.
 - Produce a project-specific manifest that is the canonical source of truth for restore. The manifest must enumerate every artifact (structure, view, data, split parts) with format, compression, byte size, and checksum so restore never has to guess filenames. (The reference C++ restore tries six filename variants plus a split-file regex; the manifest eliminates this.)
+- The manifest and checkpoint formats carry an explicit format-version field from day one, with a documented evolution policy (newer readers must read older dumps). Dumps are long-lived artifacts; the canonical format cannot be unversioned.
 - Support resumable dump as a first-class capability, not a later add-on. Checkpoint per database, collection, and shard (last server tick/dump-id position, completed split parts) so an interrupted dump can resume without re-fetching completed collections. (The reference C++ dump has no resume at all and leaves partial files on failure.)
 - Keep server-side handles alive for the duration of a transfer: periodically extend replication batch TTLs and dump-id/cursor lifetimes, and always release them on completion, error, or cancellation. (The reference tool uses a 600s replication batch TTL that must be extended; crashes can leak server-side batches.)
 - Prefer the parallel `/_api/dump/*` protocol as the primary data path, with the legacy `/_api/replication/dump` path as a documented fallback for older servers. Apply the unified retry policy (see §10) to both paths.
 - Support local filesystem output matching ArangoDB's conventional dump layout as an optional, explicitly-scoped compatibility mode (see §15).
+- MVP scope is single-server dump. Cluster-aware dump (`/_api/replication/clusterInventory`, shard-level parallelism across DB-Servers) is post-MVP; the tool must detect a cluster deployment and either use a tested code path or fail with a clear error, never silently misbehave.
 
 ### 8.5 Restore
 
@@ -291,11 +310,13 @@ Responsibilities:
 - Support restore data.
 - Support restore indexes.
 - Restore collections in dependency order: `distributeShardsLike` prototypes before their followers, document collections before edge collections, system collections handled explicitly. Restore `_analyzers` data before views and other collections, and restore `_users` data last (it can invalidate the active credentials mid-restore).
-- Order index creation correctly relative to data: create ordinary indexes before loading data, and create vector indexes after data is loaded.
-- Create arangosearch views before data and search-alias views after data (their links require target collections to exist).
+- Make index-creation order relative to data loading configurable, and benchmark both orders before fixing the default: indexes-before-data surfaces unique-constraint violations early; indexes-after-data typically loads faster. The reference C++ restore creates all non-vector indexes before data and vector indexes after data ("restore indexes first, but skip vector indexes, since they cannot be created without data" — `client-tools/Restore/RestoreFeature.cpp`); matching it is the compatibility-safe default candidate. Vector indexes must always be created after data is loaded (a functional requirement, not a tuning choice). Document the tradeoff alongside the chosen default.
+- Create arangosearch views before data and search-alias views after data (their links require target collections to exist). Note that arangosearch links present during data load reduce load throughput; document this tradeoff and consider deferring link creation as a configurable optimization.
+- Support restoring into a different topology: options to override `numberOfShards` and `replicationFactor`, and to strip cluster-only collection properties when restoring a cluster-produced dump into a single server (and vice versa).
 - Support overwrite behavior.
 - Support collection and view filters.
 - Support continuing interrupted restore. Use cheap checkpoints (logical document keys or uncompressed offsets recorded in the manifest) rather than byte offsets into compressed files, to avoid the O(n) read-and-discard seek cost the reference C++ restore incurs on gzip data.
+- Restore checkpoints must not require write access to the dump location: least-privilege storage credentials (§17) may be read-only for the source prefix. The checkpoint location is independently configurable (e.g. a separate URI or local state directory), with a sensible default and a clear error when no writable location is available.
 - Record progress after each collection phase.
 - Fail safely before data mutation when configuration is inconsistent.
 
@@ -381,6 +402,7 @@ Note that in ArangoDB's format gzip compression and encryption are mutually excl
 Initial performance targets should be expressed as relative goals until benchmarking is available.
 
 - Import throughput should at least match `arangoimport` for JSONL on a local network in MVP, and the design should aim to saturate either the server or the network/storage link rather than the client. (The C++ baseline is itself bottlenecked by blocking senders and parser-thread pacing, so "within 50%" is a floor, not a goal.)
+- This target is measured, not assumed: the test suite includes a benchmark harness that runs official `arangoimport` and `arangox-import` against the same fixture and the same Docker server and reports relative throughput (see §16.2). A relative performance requirement without a comparison harness is unfalsifiable.
 - Export throughput should primarily be limited by ArangoDB cursor performance or storage write bandwidth, not by client-side buffering.
 - Dump and restore should support concurrent collection and shard processing.
 - Memory usage should remain bounded by configured batch sizes, in-flight-byte limits, and worker counts.
@@ -392,6 +414,7 @@ The pipeline must have an explicit, documented backpressure model. This is the s
 
 - Use bounded async channels (e.g. `tokio::sync::mpsc`) between pipeline stages (read → optional transform → batch → send). Producers must block/await on a full channel rather than spinning or growing memory.
 - Cap total in-flight bytes across all workers, independent of worker count, so memory stays bounded regardless of server latency.
+- A single batch must never exceed the global in-flight-byte cap: clamp batch size to the cap (or reject the configuration at validation time), since a permit request larger than the semaphore's capacity can never be granted and deadlocks the pipeline.
 - Use a single async work-queue abstraction with structured error propagation for dump/restore parallelism. Do not maintain two separate concurrency systems (the C++ tools have both a `ClientTaskQueue` and bespoke per-server thread pools), and do not swallow worker errors.
 - Avoid busy-wait/polling loops; use async notification.
 
@@ -420,6 +443,7 @@ The pipeline must have an explicit, documented backpressure model. This is the s
 --database
 --username
 --password-env
+--password-prompt
 --auth-token-env
 --tls-ca
 --insecure
@@ -533,6 +557,8 @@ ImportJob::builder()
 - Dump and restore database.
 - Restore selected collections.
 - Validate indexes and views where supported.
+- Negative compatibility fixtures: an Enterprise-encrypted dump (`ENCRYPTION` marker) and a VelocyPack dump must be refused loudly — assert the error messages and that no partial server-state mutation occurs (§9.4, §19).
+- Throughput benchmark harness: official `arangoimport` vs `arangox-import` on a shared JSONL fixture against the same server (§11.1).
 
 ### 16.3 Storage Tests
 
@@ -586,8 +612,10 @@ Deliverables:
 - JSONL import.
 - JSON array import.
 - CSV import.
+- stdin input and gzip/zstd-compressed input files.
 - Basic collection creation.
 - Configurable batch size and worker count.
+- Benchmark harness comparing throughput against official `arangoimport` (§11.1).
 - CLI wrapper.
 
 Exit criteria:
@@ -595,6 +623,7 @@ Exit criteria:
 - Import 1 million JSONL documents into local Docker ArangoDB.
 - Verify document counts.
 - Memory remains bounded by configured batching.
+- Benchmark harness runs and reports throughput relative to `arangoimport`.
 
 ### Milestone 2: Object Storage Foundation
 
@@ -642,6 +671,9 @@ Exit criteria:
 - Dump a database to local storage and restore it into a fresh database.
 - Dump a database to S3-compatible storage and restore it.
 - Validate collection counts and indexes.
+- Encrypted (`ENCRYPTION` marker) and VelocyPack dumps are refused with clear errors.
+- Dump consistency semantics documented in `docs/dump-format.md`.
+- Index-ordering benchmark run and default recorded (§8.5).
 
 ### Milestone 5: Multi-Database and Resume
 
@@ -649,6 +681,9 @@ Deliverables:
 
 - All-databases dump.
 - Restore continuation.
+- Import resume from input-offset checkpoints for seekable/range-readable sources (§10), with documented at-least-once semantics (§8.2).
+- Adaptive batching and rate limiting driven by server feedback (§11.3).
+- Restore topology overrides: `numberOfShards`/`replicationFactor` overrides and cluster-only property stripping (§8.5).
 - Collection/view filters.
 - Better retry policy.
 - Split large data files/objects.
@@ -656,6 +691,7 @@ Deliverables:
 Exit criteria:
 
 - Interrupted restore can resume without duplicating completed collections.
+- Interrupted import resumes from its checkpoint without unbounded duplication (idempotent-key fixture).
 - Large object split restore works from S3-compatible storage.
 
 ### Milestone 6: RDF Import MVP
@@ -695,13 +731,17 @@ Exit criteria:
 - Dump format: the Rust manifest is canonical; official `arangorestore` compatibility is a scoped best-effort mode (see §15).
 - VelocyPack: MVP uses JSON/JSONL only. The tools must refuse to read VPack dumps with a clear error rather than mishandling them, and VPack support is deferred to a later milestone.
 - Enterprise encryption / encrypted dumps: not supported in MVP; restore must detect them via the `ENCRYPTION` marker and fail loudly (see §9.4).
+- Import semantics: at-least-once with documented idempotent-`_key` guidance (see §8.2). Exactly-once is out of scope.
+- JSON array input: parsed incrementally with bounded memory (one top-level element held at a time), so no in-memory size limit is needed.
+- Cluster-aware dump/restore: post-MVP; MVP detects cluster deployments and fails clearly rather than misbehaving (see §3, §8.4).
+- Graph export / XGMML: post-MVP (see §8.3).
 
 ### Still open
 
 - Which RDF crate provides the best streaming support and format coverage?
 - Should SeaweedFS be treated only as S3-compatible, or should native APIs be supported?
 - How should restore handle Enterprise-only collection properties (beyond encryption)?
-- Should imports support exactly-once semantics, or document at-least-once behavior with idempotent key strategies?
+- What is the default index-creation order relative to data load (pending the Milestone 4 benchmark; see §8.5)?
 - What is the default RDF key strategy for IRIs and literals?
 - Should RDF predicates map to one edge collection or many edge collections by default?
 
