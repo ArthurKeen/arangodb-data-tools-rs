@@ -13,6 +13,7 @@ name = "arangodb-client"
 version = "0.0.0"
 dependencies = [
  "arangodb-tools-core",
+ "bytes",
  "reqwest",
  "serde",
  "serde_json",
@@ -45,6 +46,7 @@ dependencies = [
  "arangodb-storage",
  "arangodb-tools-core",
  "async-stream",
+ "async-trait",
  "bytes",
  "csv-async",
  "futures",

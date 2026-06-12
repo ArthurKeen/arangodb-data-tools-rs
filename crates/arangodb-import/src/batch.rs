@@ -10,13 +10,15 @@ use std::fmt;
 use arangodb_tools_core::config::BatchConfig;
 use arangodb_tools_core::Result;
 use async_stream::try_stream;
+use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
 
 /// A ready-to-send batch of documents in JSONL form.
 pub struct Batch {
     /// The request body: one JSON document per line, newline-terminated.
-    pub body: Vec<u8>,
+    /// Stored as [`Bytes`] so senders can retry without copying.
+    pub body: Bytes,
     /// The number of documents in the batch.
     pub documents: usize,
     /// The 1-based ordinal of this batch within the import.
@@ -67,7 +69,7 @@ where
             if count > 0 && body.len() + line.len() + 1 > config.max_bytes {
                 index += 1;
                 yield Batch {
-                    body: std::mem::take(&mut body),
+                    body: Bytes::from(std::mem::take(&mut body)),
                     documents: count,
                     index,
                 };
@@ -81,7 +83,7 @@ where
             if count >= config.max_docs {
                 index += 1;
                 yield Batch {
-                    body: std::mem::take(&mut body),
+                    body: Bytes::from(std::mem::take(&mut body)),
                     documents: count,
                     index,
                 };
@@ -92,7 +94,7 @@ where
         if count > 0 {
             index += 1;
             yield Batch {
-                body,
+                body: Bytes::from(body),
                 documents: count,
                 index,
             };

@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use arangodb_tools_core::config::{AuthConfig, ConnectionConfig, TlsConfig};
 use arangodb_tools_core::{retry, Error, ErrorContext, Result, RetryPolicy, Secret};
+use bytes::Bytes;
 use reqwest::{Method, RequestBuilder};
 
+use crate::import::{ImportOptions, ImportResult};
 use crate::version::VersionInfo;
 
 /// An HTTP client for a single ArangoDB endpoint and database.
@@ -43,45 +45,56 @@ impl ArangoClient {
         Ok(serde_json::from_slice::<VersionInfo>(&body)?)
     }
 
-    /// Imports raw newline-delimited JSON (NDJSON) into `collection` using
-    /// `/_api/import`. The caller is responsible for constructing a valid
-    /// NDJSON payload in `body`.
-    pub async fn import_raw(&self, collection: &str, body: &[u8]) -> Result<Vec<u8>> {
-        let client = self.clone();
-        retry(&self.retry, || {
-            let client = client.clone();
-            let collection = collection.to_owned();
-            let payload = body.to_vec();
-            async move {
-                let scoped = format!(
-                    "/_db/{}/_api/import?collection={}",
-                    client.config.database, collection
-                );
-                let url = client.base.join(&scoped).map_err(|err| {
-                    Error::config(format!("invalid request URL '{scoped}': {err}"))
-                })?;
+    /// Imports a newline-delimited JSON (JSONL) batch via `POST /_api/import`.
+    ///
+    /// `body` must contain one JSON document per line (`type=documents`). The
+    /// request goes through the client retry policy; a retried send may
+    /// re-import documents from a partially applied attempt, so delivery is
+    /// at-least-once (PRD §8.2).
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] if `options.collection` is empty, or an error
+    /// if the request fails after retries or the response cannot be parsed.
+    pub async fn import_documents(
+        &self,
+        options: &ImportOptions,
+        body: Bytes,
+    ) -> Result<ImportResult> {
+        if options.collection.is_empty() {
+            return Err(Error::config("import requires a collection name"));
+        }
 
-                let mut request = client.http.request(Method::POST, url);
-                request = client.apply_auth(request);
-                request = request.header(reqwest::header::CONTENT_TYPE, "application/x-ndjson");
-                request = request.body(payload);
-
-                let response = request.send().await.map_err(map_reqwest_error)?;
-                let status = response.status();
-                let payload = response.bytes().await.map_err(map_reqwest_error)?;
-
-                if status.is_success() {
-                    Ok(payload.to_vec())
-                } else {
-                    let message = match arango_error_message(payload.as_ref()) {
-                        Some(message) => message,
-                        None => status.to_string(),
-                    };
-                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
-                }
+        let mut url = self.url_for("/_api/import")?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("collection", &options.collection);
+            query.append_pair("type", "documents");
+            query.append_pair("onDuplicate", options.on_duplicate.as_query_value());
+            if options.wait_for_sync {
+                query.append_pair("waitForSync", "true");
             }
+            if options.complete {
+                query.append_pair("complete", "true");
+            }
+            if options.details {
+                query.append_pair("details", "true");
+            }
+            if options.overwrite {
+                query.append_pair("overwrite", "true");
+            }
+            if let Some(prefix) = &options.from_prefix {
+                query.append_pair("fromPrefix", prefix);
+            }
+            if let Some(prefix) = &options.to_prefix {
+                query.append_pair("toPrefix", prefix);
+            }
+        }
+
+        let payload = retry(&self.retry, || {
+            self.post_once(url.clone(), "application/x-ndjson", body.clone())
         })
-        .await
+        .await?;
+        Ok(serde_json::from_slice::<ImportResult>(&payload)?)
     }
 
     /// Builds the absolute, database-scoped URL for an API path.
@@ -106,6 +119,32 @@ impl ArangoClient {
     /// Executes a request with retries, returning the response body on success.
     async fn execute(&self, method: Method, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>> {
         retry(&self.retry, || self.send_request(&method, path, body)).await
+    }
+
+    /// Performs a single POST attempt against a prebuilt URL.
+    async fn post_once(
+        &self,
+        url: reqwest::Url,
+        content_type: &'static str,
+        body: Bytes,
+    ) -> Result<Vec<u8>> {
+        let mut request = self.apply_auth(self.http.request(Method::POST, url));
+        request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+        request = request.body(body);
+
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        let status = response.status();
+        let payload = response.bytes().await.map_err(map_reqwest_error)?;
+
+        if status.is_success() {
+            return Ok(payload.to_vec());
+        }
+
+        let message = match arango_error_message(payload.as_ref()) {
+            Some(message) => message,
+            None => status.to_string(),
+        };
+        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
     }
 
     /// Performs a single HTTP request attempt.

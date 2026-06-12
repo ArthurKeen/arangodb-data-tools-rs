@@ -1,4 +1,8 @@
-//! Input formats and duplicate-handling modes for import.
+//! Input formats for import.
+//!
+//! Duplicate-handling modes live in [`arangodb_client::import`] (re-exported
+//! from this crate's root) since they map directly to `/_api/import`
+//! parameters.
 
 use std::path::Path;
 
@@ -69,35 +73,6 @@ impl ImportFormat {
     }
 }
 
-/// How the server should treat documents whose key already exists.
-///
-/// Mirrors the `onDuplicate` parameter of `/_api/import`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OnDuplicate {
-    /// Report a unique-constraint error and count the document as failed.
-    #[default]
-    Error,
-    /// Patch the existing document with the new attributes.
-    Update,
-    /// Replace the existing document entirely.
-    Replace,
-    /// Silently skip the document.
-    Ignore,
-}
-
-impl OnDuplicate {
-    /// The query-parameter value understood by `/_api/import`.
-    #[must_use]
-    pub fn as_query_value(self) -> &'static str {
-        match self {
-            Self::Error => "error",
-            Self::Update => "update",
-            Self::Replace => "replace",
-            Self::Ignore => "ignore",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,12 +112,5 @@ mod tests {
         assert_eq!(ImportFormat::Csv.delimiter(), Some(b','));
         assert_eq!(ImportFormat::Tsv.delimiter(), Some(b'\t'));
         assert_eq!(ImportFormat::JsonLines.delimiter(), None);
-    }
-
-    #[test]
-    fn on_duplicate_query_values() {
-        assert_eq!(OnDuplicate::default(), OnDuplicate::Error);
-        assert_eq!(OnDuplicate::Update.as_query_value(), "update");
-        assert_eq!(OnDuplicate::Ignore.as_query_value(), "ignore");
     }
 }
