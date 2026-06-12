@@ -43,6 +43,47 @@ impl ArangoClient {
         Ok(serde_json::from_slice::<VersionInfo>(&body)?)
     }
 
+    /// Imports raw newline-delimited JSON (NDJSON) into `collection` using
+    /// `/_api/import`. The caller is responsible for constructing a valid
+    /// NDJSON payload in `body`.
+    pub async fn import_raw(&self, collection: &str, body: &[u8]) -> Result<Vec<u8>> {
+        let client = self.clone();
+        retry(&self.retry, || {
+            let client = client.clone();
+            let collection = collection.to_owned();
+            let payload = body.to_vec();
+            async move {
+                let scoped = format!(
+                    "/_db/{}/_api/import?collection={}",
+                    client.config.database, collection
+                );
+                let url = client.base.join(&scoped).map_err(|err| {
+                    Error::config(format!("invalid request URL '{scoped}': {err}"))
+                })?;
+
+                let mut request = client.http.request(Method::POST, url);
+                request = client.apply_auth(request);
+                request = request.header(reqwest::header::CONTENT_TYPE, "application/x-ndjson");
+                request = request.body(payload);
+
+                let response = request.send().await.map_err(map_reqwest_error)?;
+                let status = response.status();
+                let payload = response.bytes().await.map_err(map_reqwest_error)?;
+
+                if status.is_success() {
+                    Ok(payload.to_vec())
+                } else {
+                    let message = match arango_error_message(payload.as_ref()) {
+                        Some(message) => message,
+                        None => status.to_string(),
+                    };
+                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                }
+            }
+        })
+        .await
+    }
+
     /// Builds the absolute, database-scoped URL for an API path.
     fn url_for(&self, path: &str) -> Result<reqwest::Url> {
         let scoped = format!("/_db/{}{}", self.config.database, path);
