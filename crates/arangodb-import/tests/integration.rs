@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use arangodb_client::{ArangoClient, CollectionKind, ImportOptions, ImportResult};
 use arangodb_import::{
-    read_documents, run_import, ArangoBatchSender, Batch, BatchSender, ImportFormat,
+    read_documents, run_import, validate_edge_documents, ArangoBatchSender, Batch, BatchSender,
+    ImportFormat,
 };
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::Result;
@@ -91,6 +92,62 @@ async fn imports_one_million_jsonl_documents() {
         .await
         .expect("drop collection");
     let _ = tokio::fs::remove_file(&path).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn imports_edges_with_preflight() {
+    let Some(client) = live_client() else {
+        eprintln!("ARANGO_ENDPOINT not set; skipping live edge import test");
+        return;
+    };
+    let collection = "arangox_it_edges";
+
+    let _ = client.drop_collection(collection).await;
+    client
+        .ensure_collection(collection, CollectionKind::Edge)
+        .await
+        .expect("create edge collection");
+
+    // Qualified edges pass the preflight and import. (ArangoDB does not require
+    // the referenced vertices to exist at import time.)
+    let edges = "{\"_from\":\"people/alice\",\"_to\":\"people/bob\"}\n\
+                 {\"_from\":\"people/bob\",\"_to\":\"people/carol\"}\n";
+    let reader = std::io::Cursor::new(edges.as_bytes().to_vec());
+    let documents = validate_edge_documents(
+        read_documents(ImportFormat::JsonLines, reader),
+        false,
+        false,
+    );
+    let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(
+        client.clone(),
+        ImportOptions::new(collection),
+    ));
+    let summary = run_import(
+        documents,
+        BatchConfig {
+            max_bytes: 1 << 20,
+            max_docs: 1000,
+        },
+        ConcurrencyConfig {
+            workers: 2,
+            max_in_flight_bytes: 1 << 20,
+        },
+        sender,
+    )
+    .await
+    .expect("edge import succeeds");
+    assert_eq!(summary.created, 2);
+
+    let count = client
+        .collection_count(collection)
+        .await
+        .expect("count edges");
+    assert_eq!(count, 2);
+
+    client
+        .drop_collection(collection)
+        .await
+        .expect("drop edge collection");
 }
 
 /// Writes `docs` JSONL records (`{"_key":"k<i>","v":<i>}`) to `path`.

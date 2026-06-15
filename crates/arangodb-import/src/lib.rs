@@ -10,6 +10,7 @@
 //! - [`compression`]: transparent gzip/zstd decoding of the input bytes.
 //! - [`reader`]: streaming decoders that normalize every format into a stream
 //!   of [`serde_json::Value`] documents.
+//! - [`edge`]: optional `_from`/`_to` preflight for edge-collection imports.
 //! - [`batch`]: byte- and document-bounded batching into `/_api/import`
 //!   bodies.
 //! - [`sender`]: [`run_import`] drives batches through `N` concurrent senders
@@ -17,6 +18,7 @@
 
 pub mod batch;
 pub mod compression;
+pub mod edge;
 pub mod format;
 pub mod reader;
 pub mod sender;
@@ -24,6 +26,7 @@ pub mod sender;
 pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
 pub use batch::{into_batches, Batch};
 pub use compression::{decompress, Compression};
+pub use edge::validate_edge_documents;
 pub use format::ImportFormat;
 pub use reader::{read_documents, DocumentStream};
 pub use sender::{run_import, ArangoBatchSender, BatchSender, ImportSummary};

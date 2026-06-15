@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
-    decompress, read_documents, run_import, ArangoBatchSender, BatchSender, Compression,
-    ImportFormat,
+    decompress, read_documents, run_import, validate_edge_documents, ArangoBatchSender,
+    BatchSender, Compression, ImportFormat,
 };
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::{Error, Result};
@@ -168,7 +168,17 @@ pub(crate) async fn run(args: ImportArgs) -> Result<()> {
 
     let compression = args.compression.resolve(&args.input);
     let raw = open_input(&args.input).await?;
-    let documents = read_documents(format, decompress(compression, raw));
+    let mut documents = read_documents(format, decompress(compression, raw));
+    if args.edge {
+        // Catch malformed edges before sending, rather than relying on
+        // per-document server rejection. Bare keys are allowed for an endpoint
+        // only when its prefix will qualify them.
+        documents = validate_edge_documents(
+            documents,
+            args.from_collection_prefix.is_some(),
+            args.to_collection_prefix.is_some(),
+        );
+    }
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
 
     let started = Instant::now();
