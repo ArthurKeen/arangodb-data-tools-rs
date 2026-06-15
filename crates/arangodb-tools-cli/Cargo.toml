@@ -26,3 +26,5 @@ arangodb-export = { path = "../arangodb-export" }
 arangodb-dump = { path = "../arangodb-dump" }
 arangodb-restore = { path = "../arangodb-restore" }
 arangodb-rdf = { path = "../arangodb-rdf" }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-std", "time"] }

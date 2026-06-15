@@ -9,9 +9,11 @@
 //! `docs/IMPLEMENTATION_PLAN.md`.
 
 pub mod client;
+pub mod collection;
 pub mod import;
 pub mod version;
 
 pub use client::{ArangoClient, ArangoClientBuilder};
+pub use collection::{CollectionInfo, CollectionKind};
 pub use import::{ImportOptions, ImportResult, OnDuplicate};
 pub use version::VersionInfo;

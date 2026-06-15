@@ -1,0 +1,260 @@
+//! The `arangox import` subcommand.
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+
+use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
+use arangodb_import::{read_documents, run_import, ArangoBatchSender, BatchSender, ImportFormat};
+use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
+use arangodb_tools_core::{Error, Result};
+use clap::{Args, ValueEnum};
+use tokio::io::AsyncRead;
+
+use super::connection::ConnectionArgs;
+
+/// Arguments for `arangox import`.
+#[derive(Debug, Args)]
+pub(crate) struct ImportArgs {
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
+
+    /// Target collection name.
+    #[arg(long)]
+    pub collection: String,
+
+    /// Input file path, or `-` for standard input.
+    #[arg(long)]
+    pub input: String,
+
+    /// Input format. Inferred from the file extension when omitted; required
+    /// when reading from standard input.
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<String>,
+
+    /// Create the collection if it does not exist.
+    #[arg(long)]
+    pub create_collection: bool,
+
+    /// Treat the collection as an edge collection (implies edge semantics when
+    /// creating it).
+    #[arg(long)]
+    pub edge: bool,
+
+    /// How to handle documents whose `_key` already exists.
+    #[arg(long, value_enum, default_value_t = DuplicateMode::Error)]
+    pub on_duplicate: DuplicateMode,
+
+    /// Truncate the collection before importing (non-atomic; see PRD §8.2).
+    #[arg(long)]
+    pub overwrite: bool,
+
+    /// Prefix applied to unqualified `_from` values (edge imports).
+    #[arg(long, value_name = "COLLECTION")]
+    pub from_collection_prefix: Option<String>,
+
+    /// Prefix applied to unqualified `_to` values (edge imports).
+    #[arg(long, value_name = "COLLECTION")]
+    pub to_collection_prefix: Option<String>,
+
+    /// Maximum batch size in bytes.
+    #[arg(long, default_value_t = BatchConfig::default().max_bytes)]
+    pub batch_size_bytes: usize,
+
+    /// Maximum documents per batch.
+    #[arg(long, default_value_t = BatchConfig::default().max_docs)]
+    pub max_docs: usize,
+
+    /// Number of concurrent sender workers.
+    #[arg(long)]
+    pub threads: Option<usize>,
+
+    /// Global cap on bytes buffered in flight across all workers.
+    #[arg(long, default_value_t = ConcurrencyConfig::default().max_in_flight_bytes)]
+    pub max_in_flight_bytes: usize,
+}
+
+/// Duplicate-handling mode, mirrored for clap value parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DuplicateMode {
+    /// Report an error and count the document as failed.
+    Error,
+    /// Patch the existing document.
+    Update,
+    /// Replace the existing document.
+    Replace,
+    /// Silently skip the document.
+    Ignore,
+}
+
+impl From<DuplicateMode> for OnDuplicate {
+    fn from(mode: DuplicateMode) -> Self {
+        match mode {
+            DuplicateMode::Error => OnDuplicate::Error,
+            DuplicateMode::Update => OnDuplicate::Update,
+            DuplicateMode::Replace => OnDuplicate::Replace,
+            DuplicateMode::Ignore => OnDuplicate::Ignore,
+        }
+    }
+}
+
+/// Runs an import job.
+pub(crate) async fn run(args: ImportArgs) -> Result<()> {
+    let format = resolve_format(args.format.as_deref(), &args.input)?;
+    let kind = if args.edge {
+        CollectionKind::Edge
+    } else {
+        CollectionKind::Document
+    };
+
+    let client = args.connection.build_client()?;
+
+    if args.create_collection {
+        client.ensure_collection(&args.collection, kind).await?;
+    }
+
+    let mut options = ImportOptions::new(&args.collection);
+    options.on_duplicate = args.on_duplicate.into();
+    options.overwrite = args.overwrite;
+    options.from_prefix = args.from_collection_prefix.clone();
+    options.to_prefix = args.to_collection_prefix.clone();
+
+    let batch = BatchConfig {
+        max_bytes: args.batch_size_bytes,
+        max_docs: args.max_docs,
+    };
+    let concurrency = ConcurrencyConfig {
+        workers: args
+            .threads
+            .unwrap_or_else(arangodb_tools_core::config::default_workers),
+        max_in_flight_bytes: args.max_in_flight_bytes,
+    };
+
+    let reader = open_input(&args.input).await?;
+    let documents = read_documents(format, reader);
+    let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
+
+    let started = Instant::now();
+    let summary = run_import(documents, batch, concurrency, sender).await?;
+    let elapsed = started.elapsed();
+
+    let docs_per_sec = if elapsed.as_secs_f64() > 0.0 {
+        summary.documents_sent as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    println!(
+        "imported {} document(s) into '{}' in {} batch(es) over {:.2}s ({:.0} docs/s)\n  \
+         created={} errors={} updated={} ignored={} empty={} bytes_sent={}",
+        summary.documents_sent,
+        args.collection,
+        summary.batches,
+        elapsed.as_secs_f64(),
+        docs_per_sec,
+        summary.created,
+        summary.errors,
+        summary.updated,
+        summary.ignored,
+        summary.empty,
+        summary.bytes_sent,
+    );
+
+    if summary.errors > 0 {
+        return Err(Error::config(format!(
+            "{} document(s) were rejected by the server",
+            summary.errors
+        )));
+    }
+    Ok(())
+}
+
+/// Resolves the import format from an explicit `--format` or the input path.
+fn resolve_format(explicit: Option<&str>, input: &str) -> Result<ImportFormat> {
+    if let Some(name) = explicit {
+        return ImportFormat::from_extension(&name.to_ascii_lowercase()).ok_or_else(|| {
+            Error::config(format!(
+                "unknown import format '{name}'; expected one of jsonl, ndjson, json, csv, tsv"
+            ))
+        });
+    }
+    if input == "-" {
+        return Err(Error::config(
+            "reading from stdin requires an explicit --format",
+        ));
+    }
+    ImportFormat::infer_from_path(input)
+}
+
+/// Opens the import input as an async byte stream.
+///
+/// Accepts a filesystem path, `-` for standard input, or a `file://` URI.
+/// Object-storage URIs (`s3://`, …) are not yet supported (Phase 2).
+async fn open_input(input: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    if input == "-" {
+        return Ok(Box::new(tokio::io::stdin()));
+    }
+
+    let path: &Path = if let Some((scheme, _)) = input.split_once("://") {
+        if scheme != "file" {
+            return Err(Error::config(format!(
+                "object-storage input ('{scheme}://') is not supported yet; \
+                 pass a local path or '-' for stdin"
+            )));
+        }
+        // file:///abs/path -> /abs/path
+        Path::new(input.trim_start_matches("file://"))
+    } else {
+        Path::new(input)
+    };
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|err| Error::config(format!("cannot open input '{}': {err}", path.display())))?;
+    Ok(Box::new(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_format_overrides_extension() {
+        let fmt = resolve_format(Some("csv"), "data.jsonl").unwrap();
+        assert_eq!(fmt, ImportFormat::Csv);
+    }
+
+    #[test]
+    fn infers_format_from_path() {
+        assert_eq!(
+            resolve_format(None, "users.jsonl").unwrap(),
+            ImportFormat::JsonLines
+        );
+    }
+
+    #[test]
+    fn stdin_requires_explicit_format() {
+        assert!(resolve_format(None, "-").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_format() {
+        assert!(resolve_format(Some("parquet"), "x").is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_object_storage_input() {
+        // `Box<dyn AsyncRead>` is not Debug, so match rather than unwrap_err.
+        assert!(matches!(
+            open_input("s3://bucket/users.jsonl").await,
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_file_is_a_config_error() {
+        assert!(matches!(
+            open_input("/no/such/file.jsonl").await,
+            Err(Error::Config(_))
+        ));
+    }
+}

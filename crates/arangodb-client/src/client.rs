@@ -7,6 +7,7 @@ use arangodb_tools_core::{retry, Error, ErrorContext, Result, RetryPolicy, Secre
 use bytes::Bytes;
 use reqwest::{Method, RequestBuilder};
 
+use crate::collection::{CollectionInfo, CollectionKind};
 use crate::import::{ImportOptions, ImportResult};
 use crate::version::VersionInfo;
 
@@ -95,6 +96,53 @@ impl ArangoClient {
         })
         .await?;
         Ok(serde_json::from_slice::<ImportResult>(&payload)?)
+    }
+
+    /// Fetches collection metadata, or `None` if the collection does not exist.
+    ///
+    /// # Errors
+    /// Returns an error for failures other than a 404 (which maps to `None`).
+    pub async fn collection_info(&self, name: &str) -> Result<Option<CollectionInfo>> {
+        let path = format!("/_api/collection/{name}");
+        match self.execute(Method::GET, &path, None).await {
+            Ok(body) => Ok(Some(serde_json::from_slice::<CollectionInfo>(&body)?)),
+            Err(Error::Http { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Creates a collection of the given `kind`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails (including a 409 if the collection
+    /// already exists).
+    pub async fn create_collection(&self, name: &str, kind: CollectionKind) -> Result<()> {
+        let body = serde_json::json!({ "name": name, "type": kind.type_id() });
+        let payload = serde_json::to_vec(&body)?;
+        self.execute(Method::POST, "/_api/collection", Some(&payload))
+            .await?;
+        Ok(())
+    }
+
+    /// Ensures a collection named `name` of `kind` exists, creating it if
+    /// absent. If it already exists with a different kind, returns an error
+    /// rather than silently importing into the wrong collection type.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] on a kind mismatch, or a transport/HTTP error.
+    pub async fn ensure_collection(&self, name: &str, kind: CollectionKind) -> Result<()> {
+        if let Some(info) = self.collection_info(name).await? {
+            return match info.kind() {
+                Some(existing) if existing == kind => Ok(()),
+                Some(existing) => Err(Error::config(format!(
+                    "collection '{name}' already exists as {existing:?}, but {kind:?} was requested"
+                ))),
+                None => Err(Error::config(format!(
+                    "collection '{name}' already exists with an unsupported type"
+                ))),
+            };
+        }
+        self.create_collection(name, kind).await
     }
 
     /// Builds the absolute, database-scoped URL for an API path.
