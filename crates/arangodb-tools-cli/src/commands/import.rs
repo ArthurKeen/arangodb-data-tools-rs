@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
-use arangodb_import::{read_documents, run_import, ArangoBatchSender, BatchSender, ImportFormat};
+use arangodb_import::{
+    decompress, read_documents, run_import, ArangoBatchSender, BatchSender, Compression,
+    ImportFormat,
+};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::{Error, Result};
 use clap::{Args, ValueEnum};
@@ -31,6 +34,11 @@ pub(crate) struct ImportArgs {
     /// when reading from standard input.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
+
+    /// Input compression. `auto` detects gzip/zstd from the file extension
+    /// (and assumes none for stdin).
+    #[arg(long, value_enum, default_value_t = CompressionArg::Auto)]
+    pub compression: CompressionArg,
 
     /// Create the collection if it does not exist.
     #[arg(long)]
@@ -98,6 +106,34 @@ impl From<DuplicateMode> for OnDuplicate {
     }
 }
 
+/// Compression selection, including `auto` detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CompressionArg {
+    /// Detect from the file extension; none for stdin.
+    Auto,
+    /// No compression.
+    None,
+    /// gzip.
+    Gzip,
+    /// Zstandard.
+    Zstd,
+}
+
+impl CompressionArg {
+    /// Resolves to a concrete [`Compression`], detecting from `input` when set
+    /// to `auto` (stdin, denoted by `-`, cannot be sniffed and is treated as
+    /// uncompressed).
+    fn resolve(self, input: &str) -> Compression {
+        match self {
+            Self::None => Compression::None,
+            Self::Gzip => Compression::Gzip,
+            Self::Zstd => Compression::Zstd,
+            Self::Auto if input == "-" => Compression::None,
+            Self::Auto => Compression::infer_from_path(input),
+        }
+    }
+}
+
 /// Runs an import job.
 pub(crate) async fn run(args: ImportArgs) -> Result<()> {
     let format = resolve_format(args.format.as_deref(), &args.input)?;
@@ -130,8 +166,9 @@ pub(crate) async fn run(args: ImportArgs) -> Result<()> {
         max_in_flight_bytes: args.max_in_flight_bytes,
     };
 
-    let reader = open_input(&args.input).await?;
-    let documents = read_documents(format, reader);
+    let compression = args.compression.resolve(&args.input);
+    let raw = open_input(&args.input).await?;
+    let documents = read_documents(format, decompress(compression, raw));
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
 
     let started = Instant::now();
@@ -239,6 +276,26 @@ mod tests {
     #[test]
     fn rejects_unknown_format() {
         assert!(resolve_format(Some("parquet"), "x").is_err());
+    }
+
+    #[test]
+    fn compression_auto_detects_and_overrides() {
+        assert_eq!(
+            CompressionArg::Auto.resolve("users.jsonl.gz"),
+            Compression::Gzip
+        );
+        assert_eq!(
+            CompressionArg::Auto.resolve("users.jsonl"),
+            Compression::None
+        );
+        // stdin cannot be sniffed.
+        assert_eq!(CompressionArg::Auto.resolve("-"), Compression::None);
+        // Explicit choice wins over the extension.
+        assert_eq!(
+            CompressionArg::None.resolve("users.jsonl.gz"),
+            Compression::None
+        );
+        assert_eq!(CompressionArg::Zstd.resolve("-"), Compression::Zstd);
     }
 
     #[tokio::test]

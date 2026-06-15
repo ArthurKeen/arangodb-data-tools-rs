@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["io-util", "sync", "rt"] }
 futures = { workspace = true }
 bytes = { workspace = true }
 async-stream = { workspace = true }
+async-compression = { workspace = true }
 async-trait = { workspace = true }
 csv-async = { workspace = true }
 

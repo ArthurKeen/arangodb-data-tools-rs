@@ -7,6 +7,7 @@
 //! The stages compose left to right:
 //!
 //! - [`format`]: input-format detection.
+//! - [`compression`]: transparent gzip/zstd decoding of the input bytes.
 //! - [`reader`]: streaming decoders that normalize every format into a stream
 //!   of [`serde_json::Value`] documents.
 //! - [`batch`]: byte- and document-bounded batching into `/_api/import`
@@ -15,12 +16,14 @@
 //!   under a global in-flight-byte cap.
 
 pub mod batch;
+pub mod compression;
 pub mod format;
 pub mod reader;
 pub mod sender;
 
 pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
 pub use batch::{into_batches, Batch};
+pub use compression::{decompress, Compression};
 pub use format::ImportFormat;
 pub use reader::{read_documents, DocumentStream};
 pub use sender::{run_import, ArangoBatchSender, BatchSender, ImportSummary};
