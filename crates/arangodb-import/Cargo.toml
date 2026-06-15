@@ -28,4 +28,4 @@ async-trait = { workspace = true }
 csv-async = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "time", "fs"] }

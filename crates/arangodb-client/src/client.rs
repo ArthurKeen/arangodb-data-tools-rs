@@ -7,7 +7,7 @@ use arangodb_tools_core::{retry, Error, ErrorContext, Result, RetryPolicy, Secre
 use bytes::Bytes;
 use reqwest::{Method, RequestBuilder};
 
-use crate::collection::{CollectionInfo, CollectionKind};
+use crate::collection::{CollectionCount, CollectionInfo, CollectionKind};
 use crate::import::{ImportOptions, ImportResult};
 use crate::version::VersionInfo;
 
@@ -109,6 +109,27 @@ impl ArangoClient {
             Err(Error::Http { status: 404, .. }) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    /// Returns the number of documents in a collection.
+    ///
+    /// # Errors
+    /// Returns an error if the collection does not exist or the request fails.
+    pub async fn collection_count(&self, name: &str) -> Result<u64> {
+        let path = format!("/_api/collection/{name}/count");
+        let body = self.execute(Method::GET, &path, None).await?;
+        let parsed: CollectionCount = serde_json::from_slice(&body)?;
+        Ok(parsed.count)
+    }
+
+    /// Drops a collection.
+    ///
+    /// # Errors
+    /// Returns an error if the collection does not exist or the request fails.
+    pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        let path = format!("/_api/collection/{name}");
+        self.execute(Method::DELETE, &path, None).await?;
+        Ok(())
     }
 
     /// Creates a collection of the given `kind`.

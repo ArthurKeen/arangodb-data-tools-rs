@@ -53,6 +53,13 @@ impl CollectionInfo {
     }
 }
 
+/// The document-count response from `/_api/collection/{name}/count`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) struct CollectionCount {
+    /// Number of documents in the collection.
+    pub count: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
