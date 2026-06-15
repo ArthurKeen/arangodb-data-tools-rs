@@ -269,6 +269,14 @@ Responsibilities:
 - Support `_from`/`_to` key-prefixing options for edge imports, equivalent to `arangoimport`'s `--from-collection-prefix`/`--to-collection-prefix`. The edge preflight must accept bare keys when a prefix option will rewrite them.
 - Import delivery semantics are at-least-once: a retried or resumed import may re-send documents from an incomplete batch. Document this, recommend deterministic `_key` strategies for idempotency, and define the interplay with duplicate modes (resuming with `onDuplicate=error` would fail spuriously on re-sent documents; resume requires an idempotent mode or documented behavior).
 
+#### 8.2.1 Future Input Formats (post-alpha)
+
+The reader layer normalizes every input format into a stream of JSON documents, and the import pipeline accepts any such stream, so library users can already feed it documents from any source they can parse. The formats below are candidates for *first-class* support (extension inference, CLI flag, documented type mapping, tests) and are deliberately **out of MVP/alpha scope** — each new format multiplies the integration-test matrix and must not block the JSONL/CSV exit criteria.
+
+- **Parquet (highest-value future format).** Columnar Parquet on object storage is the lingua franca for the data-engineering target users, and `arangoimport` cannot read it, so this is genuine differentiation rather than parity work. Parquet row groups are independently readable, seekable units that align naturally with the range-read `ObjectStore` trait and provide clean import-resume checkpoint boundaries (row-group index rather than byte offsets). Costs: a heavy `arrow`/`parquet` dependency (gate behind a Cargo feature so the core stays lean) and a documented, explicitly-lossy type mapping (timestamps, decimals, nested structs/lists → JSON). Slot as a post-alpha milestone.
+- **Arrow IPC (rider on Parquet).** If the `arrow` dependency is taken for Parquet, an Arrow IPC reader is nearly free. Arrow is an interchange/in-memory format and files at rest are rare, so support it only as a documented rider on the Parquet feature, not as an independently promised format. Do **not** make Arrow an internal columnar fast path; the JSON-document pipeline is the right altitude until benchmarks prove otherwise.
+- **Neo4j export formats (a mapping pipeline, not a reader).** A Neo4j → ArangoDB migration path is strategically valuable for adoption. Target the *documented export* formats produced by `neo4j-admin`/APOC — GraphML, APOC JSON, CSV-with-header-conventions — **not** Neo4j's internal binary `.dump` store format, which is undocumented, version-specific, and effectively reverse-engineering (the most fragile possible code, breaking on every Neo4j release). Property-graph import needs modeling decisions (node labels → vertex collections, relationship types → one or many edge collections, property type coercion) exactly as RDF does, so it belongs as a sibling of `arangodb-rdf` (e.g. an `arangodb-graph-import` crate) that maps to vertices/edges and bulk-loads through the existing import pipeline, not as another `ImportFormat` variant.
+
 ### 8.3 Export
 
 - Export collection contents.
@@ -735,6 +743,7 @@ Exit criteria:
 - JSON array input: parsed incrementally with bounded memory (one top-level element held at a time), so no in-memory size limit is needed.
 - Cluster-aware dump/restore: post-MVP; MVP detects cluster deployments and fails clearly rather than misbehaving (see §3, §8.4).
 - Graph export / XGMML: post-MVP (see §8.3).
+- Input formats beyond CSV/TSV/JSON/JSONL (Parquet, Arrow IPC, Neo4j exports): post-alpha; Neo4j internal binary `.dump` files are explicitly out of scope (see §8.2.1).
 
 ### Still open
 
@@ -744,6 +753,7 @@ Exit criteria:
 - What is the default index-creation order relative to data load (pending the Milestone 4 benchmark; see §8.5)?
 - What is the default RDF key strategy for IRIs and literals?
 - Should RDF predicates map to one edge collection or many edge collections by default?
+- Parquet type-mapping policy (timestamps, decimals, nested types → JSON) and which Neo4j export format to target first (gated on the §8.2.1 post-alpha work).
 
 ## 20. Recommended Initial Dependencies
 
