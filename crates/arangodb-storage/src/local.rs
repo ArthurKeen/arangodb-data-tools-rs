@@ -3,12 +3,15 @@
 use std::path::{Component, Path, PathBuf};
 
 use arangodb_tools_core::{Error, Result};
+use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
-use crate::store::{ByteRange, ByteStream, ObjectMetadata, ObjectPath, ObjectStore};
+use crate::store::{
+    ByteRange, ByteStream, MetadataStream, ObjectMetadata, ObjectPath, ObjectStore,
+};
 
 /// An [`ObjectStore`] rooted at a local directory.
 ///
@@ -41,32 +44,63 @@ impl LocalFileSystem {
         }
         Ok(self.root.join(relative))
     }
+}
 
-    /// Converts an absolute path back into a backend-relative [`ObjectPath`].
-    fn relativize(&self, full: &Path) -> ObjectPath {
-        let relative = full.strip_prefix(&self.root).unwrap_or(full);
-        let key = relative
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        ObjectPath::new(key)
+/// Converts an absolute path back into a backend-relative [`ObjectPath`].
+fn relativize(root: &Path, full: &Path) -> ObjectPath {
+    let relative = full.strip_prefix(root).unwrap_or(full);
+    let key = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    ObjectPath::new(key)
+}
+
+/// Writes a byte stream to an open file, returning the number of bytes written.
+async fn write_all(file: &mut tokio::fs::File, mut input: ByteStream) -> Result<u64> {
+    let mut size: u64 = 0;
+    while let Some(chunk) = input.next().await {
+        let chunk = chunk?;
+        size += chunk.len() as u64;
+        file.write_all(&chunk).await?;
     }
+    file.flush().await?;
+    Ok(size)
 }
 
 #[async_trait]
 impl ObjectStore for LocalFileSystem {
-    async fn put_stream(&self, path: &ObjectPath, mut input: ByteStream) -> Result<ObjectMetadata> {
+    async fn put_stream(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata> {
         let full = self.resolve(path)?;
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let mut file = tokio::fs::File::create(&full).await?;
-        let mut size: u64 = 0;
-        while let Some(chunk) = input.next().await {
-            let chunk = chunk?;
-            size += chunk.len() as u64;
-            file.write_all(&chunk).await?;
+        let size = write_all(&mut file, input).await?;
+        Ok(ObjectMetadata {
+            path: path.clone(),
+            size,
+        })
+    }
+
+    async fn put_if_absent(&self, path: &ObjectPath, input: ByteStream) -> Result<ObjectMetadata> {
+        let full = self.resolve(path)?;
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        file.flush().await?;
+        // `create_new` makes the existence check and creation atomic.
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full)
+            .await
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(Error::already_exists(path.to_string()));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let size = write_all(&mut file, input).await?;
         Ok(ObjectMetadata {
             path: path.clone(),
             size,
@@ -91,30 +125,55 @@ impl ObjectStore for LocalFileSystem {
         Ok(stream)
     }
 
-    async fn list(&self, prefix: &ObjectPath) -> Result<Vec<ObjectMetadata>> {
-        let base = self.resolve(prefix)?;
-        let mut out = Vec::new();
-        let mut stack = vec![base];
-        while let Some(current) = stack.pop() {
-            let metadata = match tokio::fs::metadata(&current).await {
-                Ok(metadata) => metadata,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err.into()),
-            };
-            if metadata.is_file() {
-                out.push(ObjectMetadata {
-                    path: self.relativize(&current),
-                    size: metadata.len(),
-                });
-            } else if metadata.is_dir() {
-                let mut entries = tokio::fs::read_dir(&current).await?;
-                while let Some(entry) = entries.next_entry().await? {
-                    stack.push(entry.path());
+    async fn head(&self, path: &ObjectPath) -> Result<Option<ObjectMetadata>> {
+        let full = self.resolve(path)?;
+        match tokio::fs::metadata(&full).await {
+            Ok(metadata) if metadata.is_file() => Ok(Some(ObjectMetadata {
+                path: path.clone(),
+                size: metadata.len(),
+            })),
+            // A directory is not an object.
+            Ok(_) => Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn list(&self, prefix: &ObjectPath) -> MetadataStream {
+        let base = match self.resolve(prefix) {
+            Ok(base) => base,
+            Err(err) => return Box::pin(futures::stream::once(async move { Err(err) })),
+        };
+        let root = self.root.clone();
+        Box::pin(try_stream! {
+            // Walk the subtree, then yield in a stable (sorted) order. Local
+            // listings are small enough to order in memory; the streaming
+            // contract matters for object stores with large prefixes.
+            let mut out = Vec::new();
+            let mut stack = vec![base];
+            while let Some(current) = stack.pop() {
+                let metadata = match tokio::fs::metadata(&current).await {
+                    Ok(metadata) => metadata,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => Err(Error::from(err))?,
+                };
+                if metadata.is_file() {
+                    out.push(ObjectMetadata {
+                        path: relativize(&root, &current),
+                        size: metadata.len(),
+                    });
+                } else if metadata.is_dir() {
+                    let mut entries = tokio::fs::read_dir(&current).await?;
+                    while let Some(entry) = entries.next_entry().await? {
+                        stack.push(entry.path());
+                    }
                 }
             }
-        }
-        out.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
-        Ok(out)
+            out.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+            for metadata in out {
+                yield metadata;
+            }
+        })
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<()> {
@@ -122,15 +181,6 @@ impl ObjectStore for LocalFileSystem {
         match tokio::fs::remove_file(&full).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    async fn exists(&self, path: &ObjectPath) -> Result<bool> {
-        let full = self.resolve(path)?;
-        match tokio::fs::metadata(&full).await {
-            Ok(_) => Ok(true),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(err.into()),
         }
     }
@@ -214,9 +264,48 @@ mod tests {
             .await
             .unwrap();
 
-        let listed = store.list(&ObjectPath::new("a")).await.unwrap();
+        let listed: Vec<ObjectMetadata> = store
+            .list(&ObjectPath::new("a"))
+            .map(Result::unwrap)
+            .collect()
+            .await;
         let paths: Vec<&str> = listed.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, vec!["a/b/two.txt", "a/one.txt"]);
+    }
+
+    #[tokio::test]
+    async fn put_if_absent_rejects_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFileSystem::new(dir.path());
+        let path = ObjectPath::new("manifest.json");
+
+        store
+            .put_if_absent(&path, once_stream(b"first"))
+            .await
+            .unwrap();
+        let conflict = store.put_if_absent(&path, once_stream(b"second")).await;
+        assert!(matches!(conflict, Err(Error::AlreadyExists(_))));
+
+        // The original content is untouched.
+        let contents = read_all(store.get_stream(&path, None).await.unwrap()).await;
+        assert_eq!(contents, b"first");
+    }
+
+    #[tokio::test]
+    async fn head_reports_size_and_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFileSystem::new(dir.path());
+        let path = ObjectPath::new("obj.bin");
+        store
+            .put_stream(&path, once_stream(b"12345"))
+            .await
+            .unwrap();
+        assert_eq!(store.head(&path).await.unwrap().map(|m| m.size), Some(5));
+        assert!(store
+            .head(&ObjectPath::new("missing"))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

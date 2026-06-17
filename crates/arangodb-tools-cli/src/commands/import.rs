@@ -9,10 +9,13 @@ use arangodb_import::{
     decompress, read_documents, run_import, validate_edge_documents, ArangoBatchSender,
     BatchSender, Compression, ImportFormat,
 };
+use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::{Error, Result};
 use clap::{Args, ValueEnum};
+use futures::StreamExt;
 use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 
 use super::connection::ConnectionArgs;
 
@@ -26,7 +29,8 @@ pub(crate) struct ImportArgs {
     #[arg(long)]
     pub collection: String,
 
-    /// Input file path, or `-` for standard input.
+    /// Input: a file path, `-` for standard input, a `file://` URI, or
+    /// `s3://bucket/key` (AWS_* env for credentials/region/endpoint).
     #[arg(long)]
     pub input: String,
 
@@ -234,30 +238,51 @@ fn resolve_format(explicit: Option<&str>, input: &str) -> Result<ImportFormat> {
 
 /// Opens the import input as an async byte stream.
 ///
-/// Accepts a filesystem path, `-` for standard input, or a `file://` URI.
-/// Object-storage URIs (`s3://`, …) are not yet supported (Phase 2).
+/// Accepts a filesystem path, `-` for standard input, a `file://` URI, or an
+/// `s3://bucket/key` URI (credentials/region/endpoint from the `AWS_*`
+/// environment; works against S3 and MinIO/LocalStack). Other object-storage
+/// schemes (`gs://`, `az://`) are not supported yet.
 async fn open_input(input: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     if input == "-" {
         return Ok(Box::new(tokio::io::stdin()));
     }
 
-    let path: &Path = if let Some((scheme, _)) = input.split_once("://") {
-        if scheme != "file" {
-            return Err(Error::config(format!(
-                "object-storage input ('{scheme}://') is not supported yet; \
-                 pass a local path or '-' for stdin"
-            )));
-        }
-        // file:///abs/path -> /abs/path
-        Path::new(input.trim_start_matches("file://"))
-    } else {
-        Path::new(input)
-    };
+    if let Some((scheme, _)) = input.split_once("://") {
+        return match scheme {
+            "file" => open_file(Path::new(input.trim_start_matches("file://"))).await,
+            "s3" => open_s3(input).await,
+            other => Err(Error::config(format!(
+                "object-storage scheme '{other}://' is not supported yet; \
+                 use s3://, a local path, or '-' for stdin"
+            ))),
+        };
+    }
+    open_file(Path::new(input)).await
+}
 
+/// Opens a local file as a byte stream.
+async fn open_file(path: &Path) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|err| Error::config(format!("cannot open input '{}': {err}", path.display())))?;
     Ok(Box::new(file))
+}
+
+/// Opens an `s3://bucket/key` object as a byte stream via the storage backend.
+async fn open_s3(uri: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    let parsed = StorageUri::parse(uri)?;
+    let bucket = parsed
+        .bucket
+        .ok_or_else(|| Error::config(format!("s3 URI is missing a bucket: {uri}")))?;
+    let backend = ObjectStoreBackend::s3(&bucket, None)?;
+    let stream = backend
+        .get_stream(&ObjectPath::new(parsed.path), None)
+        .await?;
+    // Adapt the byte stream into an AsyncRead for the format readers.
+    let reader = StreamReader::new(
+        stream.map(|chunk| chunk.map_err(|err| std::io::Error::other(err.to_string()))),
+    );
+    Ok(Box::new(reader))
 }
 
 #[cfg(test)]
@@ -309,10 +334,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_object_storage_input() {
+    async fn rejects_unsupported_object_scheme() {
+        // gs:// is not wired yet; s3:// is handled elsewhere (needs a server).
         // `Box<dyn AsyncRead>` is not Debug, so match rather than unwrap_err.
         assert!(matches!(
-            open_input("s3://bucket/users.jsonl").await,
+            open_input("gs://bucket/users.jsonl").await,
             Err(Error::Config(_))
         ));
     }

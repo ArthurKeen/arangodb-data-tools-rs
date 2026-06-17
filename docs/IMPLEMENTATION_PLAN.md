@@ -164,17 +164,29 @@ client.version().await?;
 
 ### Phase 2 — Object Storage Foundation (PRD Milestone 2)
 
+**Spike outcome (§6 #1, resolved):** adopt the `object_store` crate, wrapped
+behind our own `ObjectStore` trait (adapter pattern). It covers the PRD §10
+surface — `get_opts` ranged reads, `put_opts` `PutMode::Create` (= `put_if_absent`),
+`put_multipart`, `head`, streaming `list` — across S3/GCS/Azure/local with
+proven correctness (it is the Arrow/DataFusion storage layer). Our trait stays
+the stable public interface so backends and extensions don't leak `object_store`
+types. **Known gap:** `object_store`'s `MultipartUpload` is an in-process handle
+and cannot resume across process restarts; `put_stream` uses multipart
+transparently for large objects, but *restart-resumable* uploads (persisted
+upload-id/parts) are deferred to Phase 5, where dump resume needs them and a
+backend-specific raw S3 path is justified.
+
 **Deliverables (`arangodb-storage`)**
-- S3-compatible backend (evaluate `object_store` crate vs hand-rolled in a spike — see §6).
-- Streaming reads (range requests) and streaming writes (multipart upload).
-- Full trait surface implemented and reviewed against PRD §10 before this phase closes: `head` metadata, streaming/paginated `list`, `put_if_absent` (conditional put) for manifests/checkpoints, and multipart uploads whose state survives process restarts (resumable uploads). Trait gaps ripple through every later backend.
-- Object listing / prefix traversal; path validation against configured prefix.
+- S3-compatible backend via the `object_store` adapter (MinIO/LocalStack-tested), constructed from `s3://` URIs.
+- Streaming ranged reads and streaming writes (transparent multipart for large objects).
+- Trait surface reviewed against PRD §10: `head` metadata (subsumes `exists`), streaming/paginated `list`, `put_if_absent` (conditional put) for manifests/checkpoints. Restart-resumable multipart is explicitly deferred to Phase 5 (see spike outcome).
+- Object listing / prefix traversal; path validation against the configured prefix.
 - Wire import to read directly from `s3://` URIs.
 
 **Exit criteria**
 - Import JSONL directly from MinIO/LocalStack.
 - Write + read-back streamed object via S3 backend in integration tests.
-- Multipart upload exercised with an object larger than one part; resume of an interrupted multipart upload exercised.
+- Multipart upload exercised with an object larger than one part.
 - `put_if_absent` conflict behavior exercised (second writer gets a clean error).
 
 ---
@@ -230,9 +242,11 @@ client.version().await?;
 - Collection/view filters across dump/restore.
 - Refined adaptive retry/backoff.
 - Split large data files/objects with manifest-tracked parts.
+- Restart-resumable multipart uploads (persisted upload-id/parts) via a backend-specific raw S3 path, since `object_store` abstracts the upload handle (deferred here from Phase 2 — see Phase 2 spike outcome).
 
 **Exit criteria**
 - Interrupted restore resumes without duplicating completed collections.
+- Interrupted multipart upload resumes without re-uploading completed parts.
 - Interrupted import resumes from its checkpoint without unbounded duplication (idempotent-key fixture).
 - Large-object split restore works from S3.
 - All-databases dump/restore validated.
@@ -286,7 +300,7 @@ client.version().await?;
 
 Run these as small, time-boxed spikes **before** committing the dependent phase:
 
-1. **`object_store` crate vs hand-rolled** (gate Phase 2): does it satisfy streaming, multipart, range reads, and all four backends? Decide single dependency vs per-backend.
+1. **`object_store` crate vs hand-rolled** (gate Phase 2): **resolved — adopt `object_store`, wrapped behind our own `ObjectStore` trait.** It satisfies streaming/ranged reads (`get_opts`), multipart writes (`put_multipart`), conditional create (`put_opts` `PutMode::Create`), `head`, streaming `list`, and S3/GCS/Azure/local with proven correctness. The only unmet PRD §10 item — multipart resumable across process restarts — is deferred to Phase 5 (its `MultipartUpload` is an in-process handle). See the Phase 2 spike outcome.
 2. **RDF crate** (gate Phase 6): `oxrdf`/`oxttl` vs `rio` for streaming N-Triples/Turtle coverage and performance.
 3. **HTTP client** (gate Phase 0): `reqwest` (batteries-included, rustls) vs `hyper` (control). Default to `reqwest`+`rustls` unless a blocker appears.
 4. **VelocyPack**: confirmed out of MVP (refuse with clear error); revisit post-alpha.

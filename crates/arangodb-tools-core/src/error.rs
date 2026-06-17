@@ -99,6 +99,10 @@ pub enum Error {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// A conditional write failed because the object already exists.
+    #[error("object already exists: {0}")]
+    AlreadyExists(String),
+
     /// A parse error in input data.
     #[error("parse error: {message}")]
     Parse {
@@ -137,6 +141,11 @@ impl Error {
     /// Builds a [`Error::Storage`].
     pub fn storage(message: impl Into<String>) -> Self {
         Error::Storage(message.into())
+    }
+
+    /// Builds a [`Error::AlreadyExists`].
+    pub fn already_exists(message: impl Into<String>) -> Self {
+        Error::AlreadyExists(message.into())
     }
 
     /// Builds a [`Error::Checkpoint`].

@@ -15,9 +15,11 @@ workspace = true
 
 [dependencies]
 arangodb-tools-core = { path = "../arangodb-tools-core" }
+async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
+object_store.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util.workspace = true
 

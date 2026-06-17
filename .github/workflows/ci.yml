@@ -49,9 +49,25 @@ jobs:
     env:
       ARANGO_ENDPOINT: "http://127.0.0.1:8529"
       ARANGO_ROOT_PASSWORD: testpassword
+      # S3-compatible backend tests target MinIO (started as a step below, since
+      # service containers cannot supply MinIO's `server /data` command).
+      AWS_ENDPOINT: "http://127.0.0.1:9000"
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      OBJECT_STORE_S3_TEST_BUCKET: arangox-test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Start MinIO and create the test bucket
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          until curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null; do sleep 1; done
+          docker run --rm --network host --entrypoint sh minio/mc -c \
+            "mc alias set h http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing h/arangox-test"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
