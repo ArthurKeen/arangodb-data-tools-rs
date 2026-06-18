@@ -20,6 +20,8 @@ struct Cli {
 enum Command {
     /// Bulk-import CSV, TSV, JSON, or JSONL data into a collection.
     Import(commands::import::ImportArgs),
+    /// Export a collection or AQL query to JSONL, JSON, or CSV.
+    Export(commands::export::ExportArgs),
 }
 
 #[tokio::main]
@@ -27,6 +29,7 @@ async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Import(args) => commands::import::run(args).await,
+        Command::Export(args) => commands::export::run(args).await,
     };
 
     match result {

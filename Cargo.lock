@@ -99,8 +99,16 @@ name = "arangodb-export"
 version = "0.0.0"
 dependencies = [
  "arangodb-client",
+ "arangodb-import",
  "arangodb-storage",
  "arangodb-tools-core",
+ "async-stream",
+ "bytes",
+ "csv",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -143,6 +151,7 @@ name = "arangodb-storage"
 version = "0.0.0"
 dependencies = [
  "arangodb-tools-core",
+ "async-compression",
  "async-stream",
  "async-trait",
  "bytes",
@@ -167,6 +176,7 @@ dependencies = [
  "arangodb-tools-core",
  "clap",
  "futures",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]
@@ -426,6 +436,18 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
 ]
 
 [[package]]

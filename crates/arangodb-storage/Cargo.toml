@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 arangodb-tools-core = { path = "../arangodb-tools-core" }
+async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true

@@ -6,11 +6,13 @@
 //! backend and [`ObjectStoreBackend`] adapts the `object_store` crate for
 //! S3-compatible storage (GCS/Azure reuse the same adapter in later phases).
 
+pub mod compression;
 pub mod local;
 pub mod object_store_backend;
 pub mod store;
 pub mod uri;
 
+pub use compression::{compress, decompress, Compression};
 pub use local::LocalFileSystem;
 pub use object_store_backend::ObjectStoreBackend;
 pub use store::{ByteRange, ByteStream, MetadataStream, ObjectMetadata, ObjectPath, ObjectStore};

@@ -28,6 +28,7 @@ arangodb-restore = { path = "../arangodb-restore" }
 arangodb-rdf = { path = "../arangodb-rdf" }
 clap = { workspace = true }
 futures = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-std", "time"] }
 tokio-util = { workspace = true }
 

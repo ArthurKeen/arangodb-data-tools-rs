@@ -7,7 +7,7 @@ use std::time::Instant;
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
     decompress, read_documents, run_import, validate_edge_documents, ArangoBatchSender,
-    BatchSender, Compression, ImportFormat,
+    BatchSender, ImportFormat,
 };
 use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
@@ -18,6 +18,7 @@ use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
 use super::connection::ConnectionArgs;
+use super::CompressionArg;
 
 /// Arguments for `arangox import`.
 #[derive(Debug, Args)]
@@ -106,34 +107,6 @@ impl From<DuplicateMode> for OnDuplicate {
             DuplicateMode::Update => OnDuplicate::Update,
             DuplicateMode::Replace => OnDuplicate::Replace,
             DuplicateMode::Ignore => OnDuplicate::Ignore,
-        }
-    }
-}
-
-/// Compression selection, including `auto` detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CompressionArg {
-    /// Detect from the file extension; none for stdin.
-    Auto,
-    /// No compression.
-    None,
-    /// gzip.
-    Gzip,
-    /// Zstandard.
-    Zstd,
-}
-
-impl CompressionArg {
-    /// Resolves to a concrete [`Compression`], detecting from `input` when set
-    /// to `auto` (stdin, denoted by `-`, cannot be sniffed and is treated as
-    /// uncompressed).
-    fn resolve(self, input: &str) -> Compression {
-        match self {
-            Self::None => Compression::None,
-            Self::Gzip => Compression::Gzip,
-            Self::Zstd => Compression::Zstd,
-            Self::Auto if input == "-" => Compression::None,
-            Self::Auto => Compression::infer_from_path(input),
         }
     }
 }
@@ -311,26 +284,6 @@ mod tests {
     #[test]
     fn rejects_unknown_format() {
         assert!(resolve_format(Some("parquet"), "x").is_err());
-    }
-
-    #[test]
-    fn compression_auto_detects_and_overrides() {
-        assert_eq!(
-            CompressionArg::Auto.resolve("users.jsonl.gz"),
-            Compression::Gzip
-        );
-        assert_eq!(
-            CompressionArg::Auto.resolve("users.jsonl"),
-            Compression::None
-        );
-        // stdin cannot be sniffed.
-        assert_eq!(CompressionArg::Auto.resolve("-"), Compression::None);
-        // Explicit choice wins over the extension.
-        assert_eq!(
-            CompressionArg::None.resolve("users.jsonl.gz"),
-            Compression::None
-        );
-        assert_eq!(CompressionArg::Zstd.resolve("-"), Compression::Zstd);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use arangodb_tools_core::{Error, Result};
 
-use crate::compression::Compression;
+use arangodb_storage::Compression;
 
 /// A supported import input format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

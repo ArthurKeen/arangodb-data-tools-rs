@@ -7,7 +7,9 @@
 //! The stages compose left to right:
 //!
 //! - [`format`]: input-format detection.
-//! - [`compression`]: transparent gzip/zstd decoding of the input bytes.
+//! - compression: transparent gzip/zstd decoding of the input bytes (the
+//!   codec lives in `arangodb-storage`; [`decompress`]/[`Compression`] are
+//!   re-exported here for convenience).
 //! - [`reader`]: streaming decoders that normalize every format into a stream
 //!   of [`serde_json::Value`] documents.
 //! - [`edge`]: optional `_from`/`_to` preflight for edge-collection imports.
@@ -17,15 +19,14 @@
 //!   under a global in-flight-byte cap.
 
 pub mod batch;
-pub mod compression;
 pub mod edge;
 pub mod format;
 pub mod reader;
 pub mod sender;
 
 pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
+pub use arangodb_storage::{decompress, Compression};
 pub use batch::{into_batches, Batch};
-pub use compression::{decompress, Compression};
 pub use edge::validate_edge_documents;
 pub use format::ImportFormat;
 pub use reader::{read_documents, DocumentStream};
