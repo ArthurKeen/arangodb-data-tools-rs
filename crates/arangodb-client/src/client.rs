@@ -8,6 +8,7 @@ use bytes::Bytes;
 use reqwest::{Method, RequestBuilder};
 
 use crate::collection::{CollectionCount, CollectionInfo, CollectionKind};
+use crate::cursor::{CursorBatch, CursorRequest};
 use crate::import::{ImportOptions, ImportResult};
 use crate::version::VersionInfo;
 
@@ -107,6 +108,41 @@ impl ArangoClient {
         match self.execute(Method::GET, &path, None).await {
             Ok(body) => Ok(Some(serde_json::from_slice::<CollectionInfo>(&body)?)),
             Err(Error::Http { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Opens an AQL cursor, returning the first batch.
+    ///
+    /// # Errors
+    /// Returns an error if the query is rejected or the request fails.
+    pub async fn cursor_open(&self, request: &CursorRequest) -> Result<CursorBatch> {
+        let payload = serde_json::to_vec(request)?;
+        let body = self
+            .execute(Method::POST, "/_api/cursor", Some(&payload))
+            .await?;
+        Ok(serde_json::from_slice::<CursorBatch>(&body)?)
+    }
+
+    /// Fetches the next batch from an open cursor.
+    ///
+    /// # Errors
+    /// Returns an error if the cursor is gone or the request fails.
+    pub async fn cursor_next(&self, id: &str) -> Result<CursorBatch> {
+        let path = format!("/_api/cursor/{id}");
+        let body = self.execute(Method::PUT, &path, None).await?;
+        Ok(serde_json::from_slice::<CursorBatch>(&body)?)
+    }
+
+    /// Disposes of an open cursor. Deleting an already-gone cursor is ignored.
+    ///
+    /// # Errors
+    /// Returns an error for failures other than a 404.
+    pub async fn cursor_delete(&self, id: &str) -> Result<()> {
+        let path = format!("/_api/cursor/{id}");
+        match self.execute(Method::DELETE, &path, None).await {
+            Ok(_) => Ok(()),
+            Err(Error::Http { status: 404, .. }) => Ok(()),
             Err(err) => Err(err),
         }
     }
