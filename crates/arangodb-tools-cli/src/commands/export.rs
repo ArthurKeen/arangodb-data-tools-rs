@@ -3,10 +3,14 @@
 use std::path::Path;
 
 use arangodb_client::CursorRequest;
-use arangodb_export::{collection_query, run_export, ExportFormat};
+use arangodb_export::{
+    collection_query, document_stream, run_export, run_split_export, ExportFormat, ManifestMeta,
+};
 use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::{Error, Result};
 use clap::Args;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use super::connection::ConnectionArgs;
 use super::CompressionArg;
@@ -48,6 +52,11 @@ pub(crate) struct ExportArgs {
     /// Cursor batch size.
     #[arg(long, default_value_t = 10_000)]
     pub batch_size: u32,
+
+    /// Split the export into JSONL parts of at most this many bytes
+    /// (uncompressed) and write a manifest enumerating them. JSONL only.
+    #[arg(long, value_name = "BYTES")]
+    pub split_bytes: Option<u64>,
 }
 
 /// Runs an export job.
@@ -68,6 +77,39 @@ pub(crate) async fn run(args: ExportArgs) -> Result<()> {
 
     let client = args.connection.build_client()?;
     let (store, path) = open_output(&args.output)?;
+
+    if let Some(max_part_bytes) = args.split_bytes {
+        if format != ExportFormat::JsonLines {
+            return Err(Error::config(
+                "--split-bytes is supported for jsonl output only",
+            ));
+        }
+        let meta = ManifestMeta {
+            database: args.connection.database.clone(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default(),
+            source: args.collection.clone().or_else(|| args.query.clone()),
+        };
+        let documents = document_stream(client, request);
+        let manifest = run_split_export(
+            documents,
+            compression,
+            store.as_ref(),
+            path.as_str(),
+            max_part_bytes,
+            meta,
+        )
+        .await?;
+        println!(
+            "exported {} part(s) under '{}' + manifest '{}.manifest.json'",
+            manifest.artifacts.len(),
+            args.output,
+            args.output
+        );
+        return Ok(());
+    }
 
     let meta = run_export(
         &client,

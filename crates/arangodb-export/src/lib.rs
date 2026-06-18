@@ -14,6 +14,7 @@
 
 pub mod encode;
 pub mod format;
+pub mod split;
 
 mod cursor_stream;
 
@@ -30,6 +31,7 @@ use serde_json::Value;
 pub use cursor_stream::document_stream;
 pub use encode::encode;
 pub use format::ExportFormat;
+pub use split::{run_split_export, ManifestMeta};
 
 /// A stream of exported documents.
 pub type DocumentStream = Pin<Box<dyn Stream<Item = Result<Value>> + Send>>;

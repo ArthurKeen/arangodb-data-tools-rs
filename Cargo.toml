@@ -48,3 +48,5 @@ async-stream = "0.3"
 async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "zstd"] }
 csv-async = { version = "1", default-features = false, features = ["tokio"] }
 object_store = { version = "0.13", features = ["aws"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
