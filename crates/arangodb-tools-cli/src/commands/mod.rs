@@ -1,11 +1,41 @@
 //! CLI subcommand implementations.
 
 pub(crate) mod connection;
+pub(crate) mod dump;
 pub(crate) mod export;
 pub(crate) mod import;
+pub(crate) mod restore;
 
-use arangodb_storage::Compression;
+use std::path::Path;
+
+use arangodb_storage::{Compression, LocalFileSystem, ObjectStore, ObjectStoreBackend, StorageUri};
+use arangodb_tools_core::{Error, Result};
 use clap::ValueEnum;
+
+/// Resolves a dump *root* (a directory or object-store prefix that holds many
+/// artifacts) into a store. Accepts a path, a `file://` URI, or
+/// `s3://bucket/prefix`. Used by both `dump` (writes) and `restore` (reads).
+pub(crate) fn open_store_root(location: &str) -> Result<Box<dyn ObjectStore>> {
+    if let Some((scheme, _)) = location.split_once("://") {
+        return match scheme {
+            "file" => Ok(Box::new(LocalFileSystem::new(Path::new(
+                location.trim_start_matches("file://"),
+            )))),
+            "s3" => {
+                let parsed = StorageUri::parse(location)?;
+                let bucket = parsed.bucket.ok_or_else(|| {
+                    Error::config(format!("s3 URI is missing a bucket: {location}"))
+                })?;
+                let prefix = (!parsed.path.is_empty()).then_some(parsed.path);
+                Ok(Box::new(ObjectStoreBackend::s3(&bucket, prefix)?))
+            }
+            other => Err(Error::config(format!(
+                "object-storage scheme '{other}://' is not supported yet; use s3:// or a path"
+            ))),
+        };
+    }
+    Ok(Box::new(LocalFileSystem::new(Path::new(location))))
+}
 
 /// Compression selection shared by `import` and `export`, including `auto`
 /// detection from the file extension.

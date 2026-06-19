@@ -22,6 +22,10 @@ enum Command {
     Import(commands::import::ImportArgs),
     /// Export a collection or AQL query to JSONL, JSON, or CSV.
     Export(commands::export::ExportArgs),
+    /// Dump a database to a directory or object-store prefix.
+    Dump(commands::dump::DumpArgs),
+    /// Restore a database from a dump.
+    Restore(commands::restore::RestoreArgs),
 }
 
 #[tokio::main]
@@ -30,6 +34,8 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Import(args) => commands::import::run(args).await,
         Command::Export(args) => commands::export::run(args).await,
+        Command::Dump(args) => commands::dump::run(args).await,
+        Command::Restore(args) => commands::restore::run(args).await,
     };
 
     match result {
