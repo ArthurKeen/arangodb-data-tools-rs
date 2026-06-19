@@ -343,6 +343,26 @@ impl ArangoClient {
         Ok(parsed.count)
     }
 
+    /// Creates an index on `collection` from a definition (e.g.
+    /// `{"type":"persistent","fields":["v"]}`).
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn create_index(
+        &self,
+        collection: &str,
+        definition: &serde_json::Value,
+    ) -> Result<()> {
+        let mut url = self.url_for("/_api/index")?;
+        url.query_pairs_mut().append_pair("collection", collection);
+        let body = Bytes::from(serde_json::to_vec(definition)?);
+        retry(&self.retry, || {
+            self.send_body(Method::POST, url.clone(), "application/json", body.clone())
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Drops a collection.
     ///
     /// # Errors

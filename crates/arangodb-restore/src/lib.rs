@@ -67,12 +67,23 @@ pub async fn run_restore(
     collections.sort_by_key(|(_, s)| i64::from(s.is_edge));
 
     for (group, structure) in &collections {
+        // Create the collection without indexes; restore-collection does not
+        // build secondary indexes, so they are created explicitly after data.
         client
-            .restore_collection(&structure.parameters, &structure.indexes, options.overwrite)
+            .restore_collection(&structure.parameters, &[], options.overwrite)
             .await?;
         for data_path in &group.data_paths {
             let body = read_data(store, data_path, &manifest).await?;
             client.restore_data(&group.name, body).await?;
+        }
+        for index in &structure.indexes {
+            // The primary and edge indexes are implicit; the server creates
+            // them with the collection.
+            let kind = index.get("type").and_then(Value::as_str).unwrap_or("");
+            if kind == "primary" || kind == "edge" {
+                continue;
+            }
+            client.create_index(&group.name, index).await?;
         }
     }
 

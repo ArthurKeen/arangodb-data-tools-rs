@@ -25,4 +25,7 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 arangodb-dump = { path = "../arangodb-dump" }
+bytes = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
