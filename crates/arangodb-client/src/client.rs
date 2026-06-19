@@ -94,7 +94,12 @@ impl ArangoClient {
         }
 
         let payload = retry(&self.retry, || {
-            self.send_body(Method::POST, url.clone(), "application/x-ndjson", body.clone())
+            self.send_body(
+                Method::POST,
+                url.clone(),
+                "application/x-ndjson",
+                body.clone(),
+            )
         })
         .await?;
         Ok(serde_json::from_slice::<ImportResult>(&payload)?)
@@ -312,7 +317,12 @@ impl ArangoClient {
             .join("/_db/_system/_api/database")
             .map_err(|err| Error::config(format!("invalid database URL: {err}")))?;
         match retry(&self.retry, || {
-            self.send_body(Method::POST, url.clone(), "application/json", Bytes::from(body.clone()))
+            self.send_body(
+                Method::POST,
+                url.clone(),
+                "application/json",
+                Bytes::from(body.clone()),
+            )
         })
         .await
         {

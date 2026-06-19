@@ -92,6 +92,12 @@ dependencies = [
  "arangodb-client",
  "arangodb-storage",
  "arangodb-tools-core",
+ "async-stream",
+ "bytes",
+ "futures",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -143,8 +149,14 @@ name = "arangodb-restore"
 version = "0.0.0"
 dependencies = [
  "arangodb-client",
+ "arangodb-dump",
  "arangodb-storage",
  "arangodb-tools-core",
+ "bytes",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

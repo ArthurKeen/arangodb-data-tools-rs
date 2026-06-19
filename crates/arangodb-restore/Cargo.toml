@@ -17,3 +17,12 @@ workspace = true
 arangodb-tools-core = { path = "../arangodb-tools-core" }
 arangodb-client = { path = "../arangodb-client" }
 arangodb-storage = { path = "../arangodb-storage" }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+arangodb-dump = { path = "../arangodb-dump" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
