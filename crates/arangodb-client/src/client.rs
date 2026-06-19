@@ -10,6 +10,7 @@ use reqwest::{Method, RequestBuilder};
 use crate::collection::{CollectionCount, CollectionInfo, CollectionKind};
 use crate::cursor::{CursorBatch, CursorRequest};
 use crate::import::{ImportOptions, ImportResult};
+use crate::replication::{DumpChunk, Inventory};
 use crate::version::VersionInfo;
 
 /// An HTTP client for a single ArangoDB endpoint and database.
@@ -145,6 +146,120 @@ impl ArangoClient {
             Err(Error::Http { status: 404, .. }) => Ok(()),
             Err(err) => Err(err),
         }
+    }
+
+    /// Creates a replication batch (a pinned snapshot) with the given TTL in
+    /// seconds, returning its id. Keep it alive with
+    /// [`ArangoClient::replication_batch_extend`] and release it with
+    /// [`ArangoClient::replication_batch_delete`].
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or the response lacks an id.
+    pub async fn replication_batch_create(&self, ttl_secs: u32) -> Result<String> {
+        let payload = serde_json::to_vec(&serde_json::json!({ "ttl": ttl_secs }))?;
+        let body = self
+            .execute(Method::POST, "/_api/replication/batch", Some(&payload))
+            .await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::config("replication batch response missing id"))
+    }
+
+    /// Extends a replication batch's TTL (in seconds), keeping the snapshot
+    /// alive for a long-running transfer.
+    ///
+    /// # Errors
+    /// Returns an error if the batch is gone or the request fails.
+    pub async fn replication_batch_extend(&self, id: &str, ttl_secs: u32) -> Result<()> {
+        let payload = serde_json::to_vec(&serde_json::json!({ "ttl": ttl_secs }))?;
+        let path = format!("/_api/replication/batch/{id}");
+        self.execute(Method::PUT, &path, Some(&payload)).await?;
+        Ok(())
+    }
+
+    /// Deletes a replication batch, releasing the snapshot. A missing batch is
+    /// not an error.
+    ///
+    /// # Errors
+    /// Returns an error for failures other than a 404.
+    pub async fn replication_batch_delete(&self, id: &str) -> Result<()> {
+        let path = format!("/_api/replication/batch/{id}");
+        match self.execute(Method::DELETE, &path, None).await {
+            Ok(_) => Ok(()),
+            Err(Error::Http { status: 404, .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Retrieves the replication inventory for the connected database, pinned
+    /// to `batch_id`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn replication_inventory(
+        &self,
+        batch_id: &str,
+        include_system: bool,
+    ) -> Result<Inventory> {
+        let path = format!(
+            "/_api/replication/inventory?batchId={batch_id}&includeSystem={include_system}"
+        );
+        let body = self.execute(Method::GET, &path, None).await?;
+        Ok(serde_json::from_slice::<Inventory>(&body)?)
+    }
+
+    /// Fetches one chunk of a collection's replication dump, starting after
+    /// `from_tick` and returning up to roughly `chunk_size` bytes.
+    ///
+    /// Callers page by passing the previous chunk's `last_included_tick` as the
+    /// next `from_tick` until `has_more` is false.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails after retries.
+    pub async fn replication_dump_chunk(
+        &self,
+        collection: &str,
+        batch_id: &str,
+        from_tick: u64,
+        chunk_size: u64,
+    ) -> Result<DumpChunk> {
+        let mut url = self.url_for("/_api/replication/dump")?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("collection", collection);
+            query.append_pair("batchId", batch_id);
+            query.append_pair("from", &from_tick.to_string());
+            query.append_pair("chunkSize", &chunk_size.to_string());
+        }
+
+        retry(&self.retry, || {
+            let url = url.clone();
+            async move {
+                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let response = request.send().await.map_err(map_reqwest_error)?;
+                let status = response.status();
+                let last_included_tick = header_u64(&response, "x-arango-replication-lastincluded");
+                let has_more = header_bool(&response, "x-arango-replication-checkmore");
+                let body = response.bytes().await.map_err(map_reqwest_error)?;
+                if status.is_success() {
+                    Ok(DumpChunk {
+                        body,
+                        last_included_tick,
+                        has_more,
+                    })
+                } else {
+                    let message = match arango_error_message(body.as_ref()) {
+                        Some(message) => message,
+                        None => status.to_string(),
+                    };
+                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                }
+            }
+        })
+        .await
     }
 
     /// Returns the number of documents in a collection.
@@ -415,6 +530,26 @@ fn map_reqwest_error(err: reqwest::Error) -> Error {
     } else {
         Error::connection(err.to_string())
     }
+}
+
+/// Reads a `u64` response header, defaulting to `0` when absent or unparsable.
+fn header_u64(response: &reqwest::Response, name: &str) -> u64 {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Reads a boolean response header (`"true"`), defaulting to `false`.
+fn header_bool(response: &reqwest::Response, name: &str) -> bool {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Extracts ArangoDB's `errorMessage` field from a JSON error body, if present.

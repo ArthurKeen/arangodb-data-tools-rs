@@ -11,10 +11,12 @@ pub mod client;
 pub mod collection;
 pub mod cursor;
 pub mod import;
+pub mod replication;
 pub mod version;
 
 pub use client::{ArangoClient, ArangoClientBuilder};
 pub use collection::{CollectionInfo, CollectionKind};
 pub use cursor::{CursorBatch, CursorOptions, CursorRequest};
 pub use import::{ImportOptions, ImportResult, OnDuplicate};
+pub use replication::{DumpChunk, Inventory, InventoryCollection};
 pub use version::VersionInfo;
