@@ -94,7 +94,7 @@ impl ArangoClient {
         }
 
         let payload = retry(&self.retry, || {
-            self.post_once(url.clone(), "application/x-ndjson", body.clone())
+            self.send_body(Method::POST, url.clone(), "application/x-ndjson", body.clone())
         })
         .await?;
         Ok(serde_json::from_slice::<ImportResult>(&payload)?)
@@ -262,6 +262,66 @@ impl ArangoClient {
         .await
     }
 
+    /// Recreates a collection from its replication `parameters` and `indexes`
+    /// (as returned by [`ArangoClient::replication_inventory`]). With
+    /// `overwrite`, an existing collection of the same name is replaced.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn restore_collection(
+        &self,
+        parameters: &serde_json::Value,
+        indexes: &[serde_json::Value],
+        overwrite: bool,
+    ) -> Result<()> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "parameters": parameters,
+            "indexes": indexes,
+        }))?;
+        let path = format!("/_api/replication/restore-collection?overwrite={overwrite}");
+        self.execute(Method::PUT, &path, Some(&body)).await?;
+        Ok(())
+    }
+
+    /// Restores documents into `collection` from a replication dump body
+    /// (`{"type":2300,"data":…}` JSONL, as produced by
+    /// [`ArangoClient::replication_dump_chunk`]).
+    ///
+    /// # Errors
+    /// Returns an error if the request fails after retries.
+    pub async fn restore_data(&self, collection: &str, body: Bytes) -> Result<()> {
+        let mut url = self.url_for("/_api/replication/restore-data")?;
+        url.query_pairs_mut().append_pair("collection", collection);
+        retry(&self.retry, || {
+            self.send_body(Method::PUT, url.clone(), "application/json", body.clone())
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Creates a database (idempotent: an existing database is not an error).
+    /// Always targets `_system`, regardless of the client's configured
+    /// database.
+    ///
+    /// # Errors
+    /// Returns an error for failures other than a 409 (already exists).
+    pub async fn create_database(&self, name: &str) -> Result<()> {
+        let body = serde_json::to_vec(&serde_json::json!({ "name": name }))?;
+        let url = self
+            .base
+            .join("/_db/_system/_api/database")
+            .map_err(|err| Error::config(format!("invalid database URL: {err}")))?;
+        match retry(&self.retry, || {
+            self.send_body(Method::POST, url.clone(), "application/json", Bytes::from(body.clone()))
+        })
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(Error::Http { status: 409, .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Returns the number of documents in a collection.
     ///
     /// # Errors
@@ -341,14 +401,15 @@ impl ArangoClient {
         retry(&self.retry, || self.send_request(&method, path, body)).await
     }
 
-    /// Performs a single POST attempt against a prebuilt URL.
-    async fn post_once(
+    /// Performs a single request attempt with a body against a prebuilt URL.
+    async fn send_body(
         &self,
+        method: Method,
         url: reqwest::Url,
         content_type: &'static str,
         body: Bytes,
     ) -> Result<Vec<u8>> {
-        let mut request = self.apply_auth(self.http.request(Method::POST, url));
+        let mut request = self.apply_auth(self.http.request(method, url));
         request = request.header(reqwest::header::CONTENT_TYPE, content_type);
         request = request.body(body);
 
