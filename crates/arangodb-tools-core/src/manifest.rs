@@ -64,6 +64,47 @@ pub struct Checksum {
     pub value: String,
 }
 
+/// A rolling checkpoint for a resumable import.
+///
+/// Imports record the highest *contiguous* batch index that the server has
+/// acknowledged, plus the documents and request bytes those batches contained.
+/// Because batching is deterministic (identical input + config yields identical
+/// batches and indices), a restarted import can re-derive the same batch
+/// sequence and skip every batch whose index is `<= committed_batches`.
+///
+/// A single contiguous high-water mark is used rather than per-batch markers so
+/// out-of-order, concurrent sends can never advance the checkpoint past a batch
+/// that has not actually been committed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportCheckpoint {
+    /// Highest batch index for which it and all lower-numbered batches are
+    /// confirmed committed by the server.
+    pub committed_batches: u64,
+    /// Total documents contained in the committed batches.
+    pub documents_committed: u64,
+    /// Total request-body bytes contained in the committed batches.
+    pub bytes_committed: u64,
+}
+
+impl ImportCheckpoint {
+    /// Serializes the checkpoint to compact JSON.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::Serialization`] if serialization fails.
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// Parses a checkpoint from JSON bytes.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::Serialization`] if the bytes are not a valid
+    /// checkpoint document.
+    pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
 /// Encryption metadata recorded in the manifest.
 ///
 /// Enterprise-encrypted payloads are not produced or readable by this project
@@ -234,5 +275,17 @@ mod tests {
             algorithm: "aes-256-ctr".to_owned(),
         };
         assert!(info.is_encrypted());
+    }
+
+    #[test]
+    fn import_checkpoint_round_trips() {
+        let checkpoint = ImportCheckpoint {
+            committed_batches: 42,
+            documents_committed: 4200,
+            bytes_committed: 1_048_576,
+        };
+        let json = checkpoint.to_json().unwrap();
+        let parsed = ImportCheckpoint::from_json(json.as_bytes()).unwrap();
+        assert_eq!(checkpoint, parsed);
     }
 }

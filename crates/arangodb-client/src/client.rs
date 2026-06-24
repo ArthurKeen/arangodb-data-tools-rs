@@ -38,6 +38,68 @@ impl ArangoClient {
         &self.config.database
     }
 
+    /// Returns a new `ArangoClient` scoped to `database` but reusing the same
+    /// transport, auth, and retry policy. This is a cheap clone-like helper
+    /// used by multi-database operations.
+    #[must_use]
+    pub fn with_database(&self, database: impl Into<String>) -> ArangoClient {
+        let mut cfg = self.config.clone();
+        cfg.database = database.into();
+        ArangoClient {
+            http: self.http.clone(),
+            config: cfg,
+            retry: self.retry.clone(),
+            base: self.base.clone(),
+        }
+    }
+
+    /// Returns the list of databases accessible to the current credentials.
+    /// This calls the server `/_api/database` endpoint on the `_system` DB
+    /// (the endpoint used for listing/creating databases).
+    pub async fn list_databases(&self) -> Result<Vec<String>> {
+        let url = self
+            .base
+            .join("/_db/_system/_api/database")
+            .map_err(|err| Error::config(format!("invalid database list URL: {err}")))?;
+
+        let payload = retry(&self.retry, || {
+            let url = url.clone();
+            async move {
+                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let response = request.send().await.map_err(map_reqwest_error)?;
+                let status = response.status();
+                let body = response.bytes().await.map_err(map_reqwest_error)?;
+                if status.is_success() {
+                    Ok(body.to_vec())
+                } else {
+                    let message = match arango_error_message(body.as_ref()) {
+                        Some(m) => m,
+                        None => status.to_string(),
+                    };
+                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                }
+            }
+        })
+        .await?;
+
+        let v: serde_json::Value = serde_json::from_slice(&payload)?;
+        if let Some(arr) = v.get("result").and_then(|r| r.as_array()) {
+            let names = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
+            return Ok(names);
+        }
+        if let Some(arr) = v.as_array() {
+            let names = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
+            return Ok(names);
+        }
+        Err(Error::config("unexpected response from /_api/database"))
+    }
+
     /// Fetches server version information via `/_api/version`.
     ///
     /// # Errors

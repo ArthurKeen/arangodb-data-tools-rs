@@ -28,6 +28,9 @@ use sha2::{Digest, Sha256};
 pub struct DumpOptions {
     /// Include system collections (names starting with `_`).
     pub include_system: bool,
+    /// Dump all accessible databases (writes per-database artifacts under
+    /// `databases/{name}/...` and produces a combined manifest).
+    pub all_databases: bool,
     /// Compression for data artifacts.
     pub compression: Compression,
     /// Replication-batch TTL, in seconds (extended before each collection).
@@ -46,6 +49,7 @@ impl Default for DumpOptions {
     fn default() -> Self {
         Self {
             include_system: false,
+            all_databases: false,
             compression: Compression::None,
             batch_ttl_secs: 600,
             chunk_size: 8 * 1024 * 1024,
@@ -68,13 +72,45 @@ pub async fn run_dump(
     store: &dyn ObjectStore,
     options: &DumpOptions,
 ) -> Result<Manifest> {
-    let batch = client
-        .replication_batch_create(options.batch_ttl_secs)
-        .await?;
-    // Ensure the batch is released regardless of how the dump finishes.
-    let result = dump_with_batch(client, store, options, &batch).await;
-    let _ = client.replication_batch_delete(&batch).await;
-    result
+    if !options.all_databases {
+        let batch = client
+            .replication_batch_create(options.batch_ttl_secs)
+            .await?;
+        // Ensure the batch is released regardless of how the dump finishes.
+        let result = dump_with_batch(client, store, options, &batch).await;
+        let _ = client.replication_batch_delete(&batch).await;
+        result
+    } else {
+        // Multi-database dump: enumerate accessible databases and append each
+        // database's artifacts into a combined manifest. Each artifact path is
+        // prefixed with `databases/{db}/` so restores can target a specific DB.
+        let dbs = client.list_databases().await?;
+        let mut manifest = Manifest::new(
+            "all",
+            options.tool_version.clone(),
+            options.created_at.clone(),
+        );
+        for db in dbs {
+            let client_db = client.with_database(&db);
+            let batch = client_db
+                .replication_batch_create(options.batch_ttl_secs)
+                .await?;
+            // Prefix all artifact paths for this database.
+            let prefix = format!("databases/{db}/");
+            dump_db_into_manifest(&client_db, store, options, &batch, &prefix, &mut manifest)
+                .await?;
+            let _ = client_db.replication_batch_delete(&batch).await;
+        }
+
+        let manifest_json = manifest.to_json()?;
+        store
+            .put_stream(
+                &ObjectPath::new("dump.manifest.json"),
+                once(Bytes::from(manifest_json.into_bytes())),
+            )
+            .await?;
+        Ok(manifest)
+    }
 }
 
 /// The dump body, run inside an active replication batch.
@@ -84,15 +120,34 @@ async fn dump_with_batch(
     options: &DumpOptions,
     batch: &str,
 ) -> Result<Manifest> {
-    let inventory = client
-        .replication_inventory(batch, options.include_system)
-        .await?;
-
     let mut manifest = Manifest::new(
         options.database.clone(),
         options.tool_version.clone(),
         options.created_at.clone(),
     );
+    dump_db_into_manifest(client, store, options, batch, "", &mut manifest).await?;
+    let manifest_json = manifest.to_json()?;
+    store
+        .put_stream(
+            &ObjectPath::new("dump.manifest.json"),
+            once(Bytes::from(manifest_json.into_bytes())),
+        )
+        .await?;
+    Ok(manifest)
+}
+
+/// Core per-database dump logic which appends artifacts into `manifest`.
+async fn dump_db_into_manifest(
+    client: &ArangoClient,
+    store: &dyn ObjectStore,
+    options: &DumpOptions,
+    batch: &str,
+    path_prefix: &str,
+    manifest: &mut Manifest,
+) -> Result<()> {
+    let inventory = client
+        .replication_inventory(batch, options.include_system)
+        .await?;
 
     for collection in &inventory.collections {
         if collection.is_system() && !options.include_system {
@@ -108,23 +163,17 @@ async fn dump_with_batch(
             .replication_batch_extend(batch, options.batch_ttl_secs)
             .await?;
 
-        write_structure(store, &name, collection, &mut manifest).await?;
-        write_data(client, store, options, batch, &name, &mut manifest).await?;
+        write_structure_with_prefix(store, path_prefix, &name, collection, manifest).await?;
+        write_data_with_prefix(client, store, options, batch, path_prefix, &name, manifest).await?;
     }
-
-    let manifest_json = manifest.to_json()?;
-    store
-        .put_stream(
-            &ObjectPath::new("dump.manifest.json"),
-            once(Bytes::from(manifest_json.into_bytes())),
-        )
-        .await?;
-    Ok(manifest)
+    Ok(())
 }
 
-/// Writes a collection's structure (`parameters` + `indexes`) artifact.
-async fn write_structure(
+/// Writes a collection's structure (`parameters` + `indexes`) artifact under
+/// `prefix` (empty for a single-database dump).
+async fn write_structure_with_prefix(
     store: &dyn ObjectStore,
+    prefix: &str,
     name: &str,
     collection: &arangodb_client::InventoryCollection,
     manifest: &mut Manifest,
@@ -134,7 +183,7 @@ async fn write_structure(
         "indexes": collection.indexes,
     });
     let bytes = serde_json::to_vec_pretty(&structure)?;
-    let path = format!("{name}.structure.json");
+    let path = format!("{prefix}{name}.structure.json");
     let meta = store
         .put_stream(&ObjectPath::new(path.clone()), once(Bytes::from(bytes)))
         .await?;
@@ -152,12 +201,14 @@ async fn write_structure(
 }
 
 /// Streams a collection's replication dump to a (optionally compressed) data
-/// artifact, recording its size and checksum.
-async fn write_data(
+/// artifact under `prefix` (empty for a single-database dump), recording its
+/// size and checksum.
+async fn write_data_with_prefix(
     client: &ArangoClient,
     store: &dyn ObjectStore,
     options: &DumpOptions,
     batch: &str,
+    prefix: &str,
     name: &str,
     manifest: &mut Manifest,
 ) -> Result<()> {
@@ -165,7 +216,7 @@ async fn write_data(
         Some(ext) => format!("data.jsonl.{ext}"),
         None => "data.jsonl".to_string(),
     };
-    let path = format!("{name}.{suffix}");
+    let path = format!("{prefix}{name}.{suffix}");
 
     let raw = dump_data_stream(
         client.clone(),

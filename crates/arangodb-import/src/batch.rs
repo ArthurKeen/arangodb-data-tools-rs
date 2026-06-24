@@ -15,6 +15,11 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 
 /// A ready-to-send batch of documents in JSONL form.
+///
+/// Batching is deterministic: the same input documents and [`BatchConfig`]
+/// always produce the same sequence of batches with the same `index` values.
+/// Resumable imports rely on this so a restarted run can skip batches whose
+/// `index` is already recorded in the checkpoint.
 pub struct Batch {
     /// The request body: one JSON document per line, newline-terminated.
     /// Stored as [`Bytes`] so senders can retry without copying.
@@ -178,6 +183,21 @@ mod tests {
         assert!(lines[2].is_empty());
         let first: Value = serde_json::from_slice(lines[0]).unwrap();
         assert_eq!(first["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn batching_is_deterministic() {
+        // Resume correctness depends on identical input producing identical
+        // batch boundaries, indices, and bodies across runs.
+        let values: Vec<Value> = (0..50).map(|n| serde_json::json!({ "n": n })).collect();
+        let first = collect_batches(into_batches(docs(values.clone()), config(64, 1_000))).await;
+        let second = collect_batches(into_batches(docs(values), config(64, 1_000))).await;
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.index, b.index);
+            assert_eq!(a.documents, b.documents);
+            assert_eq!(a.body, b.body);
+        }
     }
 
     #[tokio::test]

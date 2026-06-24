@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
-    decompress, read_documents, run_import, validate_edge_documents, ArangoBatchSender,
-    BatchSender, ImportFormat,
+    decompress, read_documents, run_import, run_import_with_checkpoint, validate_edge_documents,
+    ArangoBatchSender, BatchSender, CheckpointConfig, ImportFormat,
 };
-use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
+use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::{Error, Result};
 use clap::{Args, ValueEnum};
@@ -85,6 +85,12 @@ pub(crate) struct ImportArgs {
     /// Global cap on bytes buffered in flight across all workers.
     #[arg(long, default_value_t = ConcurrencyConfig::default().max_in_flight_bytes)]
     pub max_in_flight_bytes: usize,
+
+    /// Enable resumable import: read and update a rolling checkpoint at this
+    /// location (a local path or `s3://bucket/key`). Re-running with the same
+    /// checkpoint skips batches already committed by the previous run.
+    #[arg(long, value_name = "URI")]
+    pub checkpoint: Option<String>,
 }
 
 /// Duplicate-handling mode, mirrored for clap value parsing.
@@ -159,7 +165,14 @@ pub(crate) async fn run(args: ImportArgs) -> Result<()> {
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
 
     let started = Instant::now();
-    let summary = run_import(documents, batch, concurrency, sender).await?;
+    let summary = match args.checkpoint.as_deref() {
+        Some(uri) => {
+            let checkpoint = build_checkpoint(uri)?;
+            run_import_with_checkpoint(documents, batch, concurrency, sender, Some(checkpoint))
+                .await?
+        }
+        None => run_import(documents, batch, concurrency, sender).await?,
+    };
     let elapsed = started.elapsed();
 
     let docs_per_sec = if elapsed.as_secs_f64() > 0.0 {
@@ -207,6 +220,52 @@ fn resolve_format(explicit: Option<&str>, input: &str) -> Result<ImportFormat> {
         ));
     }
     ImportFormat::infer_from_path(input)
+}
+
+/// Builds a [`CheckpointConfig`] from a checkpoint location.
+///
+/// Accepts a local filesystem path, a `file://` URI, or an `s3://bucket/key`
+/// URI. The checkpoint is a single object that is overwritten as the import
+/// makes progress.
+fn build_checkpoint(uri: &str) -> Result<CheckpointConfig> {
+    let (store, path): (Arc<dyn ObjectStore>, ObjectPath) = match uri.split_once("://") {
+        Some(("s3", _)) => {
+            let parsed = StorageUri::parse(uri)?;
+            let bucket = parsed.bucket.ok_or_else(|| {
+                Error::config(format!("s3 checkpoint URI is missing a bucket: {uri}"))
+            })?;
+            let backend = ObjectStoreBackend::s3(&bucket, None)?;
+            (Arc::new(backend), ObjectPath::new(parsed.path))
+        }
+        Some(("file", _)) => local_checkpoint(Path::new(uri.trim_start_matches("file://")))?,
+        Some((other, _)) => {
+            return Err(Error::config(format!(
+                "checkpoint scheme '{other}://' is not supported; use a local path or s3://"
+            )));
+        }
+        None => local_checkpoint(Path::new(uri))?,
+    };
+    Ok(CheckpointConfig::new(store, path))
+}
+
+/// Resolves a local checkpoint path into a filesystem-backed store (rooted at
+/// the path's parent) and the file name as its object path.
+fn local_checkpoint(path: &Path) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::config(format!(
+                "checkpoint path has no file name: {}",
+                path.display()
+            ))
+        })?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => Path::new(".").to_path_buf(),
+    };
+    let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new(parent));
+    Ok((store, ObjectPath::new(file_name.to_owned())))
 }
 
 /// Opens the import input as an async byte stream.
@@ -300,6 +359,26 @@ mod tests {
     async fn missing_file_is_a_config_error() {
         assert!(matches!(
             open_input("/no/such/file.jsonl").await,
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[test]
+    fn builds_local_checkpoint_with_file_name_object() {
+        let cfg = build_checkpoint("/tmp/imports/users.checkpoint.json").unwrap();
+        assert_eq!(cfg.path.as_str(), "users.checkpoint.json");
+    }
+
+    #[test]
+    fn builds_relative_local_checkpoint() {
+        let cfg = build_checkpoint("users.checkpoint.json").unwrap();
+        assert_eq!(cfg.path.as_str(), "users.checkpoint.json");
+    }
+
+    #[test]
+    fn rejects_unsupported_checkpoint_scheme() {
+        assert!(matches!(
+            build_checkpoint("gs://bucket/cp.json"),
             Err(Error::Config(_))
         ));
     }

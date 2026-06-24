@@ -26,8 +26,12 @@ pub mod sender;
 
 pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
 pub use arangodb_storage::{decompress, Compression};
+pub use arangodb_tools_core::manifest::ImportCheckpoint;
 pub use batch::{into_batches, Batch};
 pub use edge::validate_edge_documents;
 pub use format::ImportFormat;
 pub use reader::{read_documents, DocumentStream};
-pub use sender::{run_import, ArangoBatchSender, BatchSender, ImportSummary};
+pub use sender::{
+    load_checkpoint, run_import, run_import_with_checkpoint, ArangoBatchSender, BatchSender,
+    CheckpointConfig, ImportSummary,
+};
