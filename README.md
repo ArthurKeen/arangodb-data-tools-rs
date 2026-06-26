@@ -20,19 +20,21 @@ See [`RUST_ARANGODB_TOOLS_PRD.md`](RUST_ARANGODB_TOOLS_PRD.md) for the full prod
 
 ## Workspace layout
 
-This is a Cargo workspace. Crates (most are stubs today; see the implementation plan for build order):
+This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for build order and design notes.
 
-| Crate | Purpose |
-|-------|---------|
-| `arangodb-tools-core` | Shared config, errors, retry, concurrency, progress, manifest types |
-| `arangodb-client` | ArangoDB HTTP client (connection, auth, TLS, API helpers) |
-| `arangodb-storage` | `ObjectStore` abstraction: local FS, S3, GCS, Azure, SeaweedFS |
-| `arangodb-import` | Bulk import (CSV/TSV/JSON/JSONL) |
-| `arangodb-export` | Export via AQL cursors (JSONL/JSON/CSV/XGMML) |
-| `arangodb-dump` | Database dump |
-| `arangodb-restore` | Database restore |
-| `arangodb-rdf` | RDF bulk import (N-Triples, Turtle, ...) |
-| `arangodb-tools-cli` | CLI binaries (`arangox-*`) |
+| Crate | Purpose | Status |
+|-------|---------|--------|
+| `arangodb-tools-core` | Shared config, errors, retry, concurrency, progress, manifest types | Implemented |
+| `arangodb-client` | ArangoDB HTTP client (connection, auth, TLS, version, collections, cursor, import, replication) | Implemented |
+| `arangodb-storage` | `ObjectStore` abstraction: local FS and S3-compatible (via `object_store`), plus URI parsing and compression | Local FS + S3-compatible |
+| `arangodb-import` | Streaming bulk import (CSV/TSV/JSON/JSONL) with bounded batching and resumable checkpointing | Implemented |
+| `arangodb-export` | Export via AQL cursors (JSONL/JSON/CSV), with optional size-split JSONL + manifest | Implemented |
+| `arangodb-dump` | Database dump (manifest-driven) | Implemented |
+| `arangodb-restore` | Database restore from a dump | Implemented |
+| `arangodb-rdf` | RDF bulk import (N-Triples, Turtle, ...) | Planned (stub) |
+| `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore` subcommands | Implemented (no `rdf` subcommand yet) |
+
+> Storage backends: local filesystem and S3-compatible object stores (AWS S3, MinIO/LocalStack, SeaweedFS via its S3 gateway) are wired today through `AWS_*` environment configuration. GCS (`gs://`) and Azure (`az://`) are planned and currently rejected with a clear error.
 
 ## Building
 
@@ -44,6 +46,47 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
+
+## Usage
+
+The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, and `restore` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--username`, `--password-env`/`--auth-token-env` (names of env vars holding the secret; secrets are never passed on the command line), `--tls-ca`, and `--insecure`.
+
+```bash
+# Build, then run via cargo (or use the compiled ./target/release/arangox)
+cargo run -p arangodb-tools-cli -- <subcommand> [flags]
+```
+
+Import CSV/TSV/JSON/JSONL (format inferred from the extension, or set `--format`). Input can be a file, `-` for stdin, a `file://` URI, or `s3://bucket/key`:
+
+```bash
+arangox import \
+  --endpoint http://localhost:8529 --database mydb \
+  --username root --password-env ARANGO_PASSWORD \
+  --collection users --input users.jsonl --create-collection
+
+# Resumable: re-running with the same checkpoint skips committed batches
+arangox import --collection users --input users.jsonl \
+  --checkpoint users.checkpoint.json
+```
+
+Export a collection or AQL query to JSONL/JSON/CSV (CSV requires `--fields`). Output can be a file, `file://`, or `s3://bucket/key`:
+
+```bash
+arangox export --collection users --output users.jsonl
+arangox export --query 'FOR u IN users FILTER u.active RETURN u' \
+  --output active.jsonl
+# Split large exports into size-bounded JSONL parts plus a manifest
+arangox export --collection events --output events.jsonl --split-bytes 134217728
+```
+
+Dump a database and restore it (the manifest is the source of truth):
+
+```bash
+arangox dump --database mydb --output ./dump-mydb
+arangox restore --database mydb-copy --input ./dump-mydb --create-database
+```
+
+Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
 
 ## Compatibility
 

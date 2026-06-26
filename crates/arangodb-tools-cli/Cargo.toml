@@ -1,6 +1,6 @@
 [package]
 name = "arangodb-tools-cli"
-description = "Command-line tools (arangox-*) for ArangoDB import, export, dump, restore, and RDF workflows."
+description = "The arangox command-line tool for ArangoDB import, export, dump, and restore workflows."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

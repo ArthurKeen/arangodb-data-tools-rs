@@ -1,7 +1,7 @@
 //! `arangox` command-line entry point.
 //!
-//! Subcommands map CLI options to the library job crates. `import` is wired;
-//! `export`, `dump`, `restore`, and `rdf` land in later phases. See
+//! Subcommands map CLI options to the library job crates: `import`, `export`,
+//! `dump`, and `restore` are wired. RDF bulk import lands in a later phase. See
 //! `docs/IMPLEMENTATION_PLAN.md`.
 
 mod commands;
