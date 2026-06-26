@@ -12,6 +12,10 @@
 *.swp
 *~
 
+# Agent / tooling local config
+.claude/
+.cursor/
+
 # Local env / secrets
 .env
 .env.*
