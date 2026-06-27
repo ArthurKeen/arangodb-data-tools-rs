@@ -12,6 +12,12 @@ members = [
     "crates/arangodb-tools-cli",
 ]
 
+# The Python binding is a `cdylib` built with maturin/PyO3 and needs a Python
+# interpreter at build time, so it is intentionally kept out of the default
+# `cargo build --workspace` (and CI). Build it from `bindings/python` with
+# `maturin develop` / `maturin build`. See bindings/python/README.md.
+exclude = ["bindings/python"]
+
 [workspace.package]
 version = "0.0.0"
 edition = "2021"

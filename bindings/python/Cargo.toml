@@ -1,0 +1,28 @@
+[package]
+name = "arangodb-py"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+authors = ["Arthur Keen"]
+repository = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
+description = "Python bindings (PyO3/maturin) for arangodb-data-tools-rs bulk data workflows."
+publish = false
+
+# Build a Python extension module. The compiled artifact is imported from
+# Python as `arangox` (see `[lib] name` and pyproject's `tool.maturin`).
+[lib]
+name = "arangox"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `extension-module` keeps us from linking libpython (required for wheels);
+# `abi3-py38` builds a single wheel compatible with CPython >= 3.8.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+# `full` is convenient for a binding sketch; trim to the needed drivers
+# (rt-multi-thread, net, time, io-util, fs) before shipping.
+tokio = { version = "1", features = ["full"] }
+
+arangodb-tools-core = { path = "../../crates/arangodb-tools-core" }
+arangodb-client = { path = "../../crates/arangodb-client" }
+arangodb-import = { path = "../../crates/arangodb-import" }

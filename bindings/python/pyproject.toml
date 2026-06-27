@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "arangox"
+version = "0.0.0"
+description = "Python bindings for arangodb-data-tools-rs (bulk import/export/dump/restore)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Arthur Keen" }]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Repository = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
+
+[tool.maturin]
+# The Rust crate lives alongside this file; the module is imported as `arangox`.
+manifest-path = "Cargo.toml"
+module-name = "arangox"
+features = ["pyo3/extension-module"]

@@ -1,12 +1,14 @@
 //! The `arangox export` subcommand.
 
 use std::path::Path;
+use std::time::Instant;
 
 use arangodb_client::CursorRequest;
 use arangodb_export::{
     collection_query, document_stream, run_export, run_split_export, ExportFormat, ManifestMeta,
 };
 use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
+use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::{Error, Result};
 use clap::Args;
 use time::format_description::well_known::Rfc3339;
@@ -14,6 +16,7 @@ use time::OffsetDateTime;
 
 use super::connection::ConnectionArgs;
 use super::CompressionArg;
+use crate::output::Reporter;
 
 /// Arguments for `arangox export`.
 #[derive(Debug, Args)]
@@ -60,7 +63,7 @@ pub(crate) struct ExportArgs {
 }
 
 /// Runs an export job.
-pub(crate) async fn run(args: ExportArgs) -> Result<()> {
+pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
     let format = ExportFormat::parse(&args.format)?;
     let request = build_request(
         args.collection.as_deref(),
@@ -77,6 +80,9 @@ pub(crate) async fn run(args: ExportArgs) -> Result<()> {
 
     let client = args.connection.build_client()?;
     let (store, path) = open_output(&args.output)?;
+
+    reporter.started("export");
+    let started = Instant::now();
 
     if let Some(max_part_bytes) = args.split_bytes {
         if format != ExportFormat::JsonLines {
@@ -102,11 +108,32 @@ pub(crate) async fn run(args: ExportArgs) -> Result<()> {
             meta,
         )
         .await?;
-        println!(
-            "exported {} part(s) under '{}' + manifest '{}.manifest.json'",
-            manifest.artifacts.len(),
-            args.output,
-            args.output
+        let parts = manifest.artifacts.len();
+        let manifest_name = format!("{}.manifest.json", args.output);
+
+        reporter.finished(ProgressSnapshot {
+            batches: parts as u64,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+            ..ProgressSnapshot::default()
+        });
+        reporter.result(
+            || {
+                format!(
+                    "exported {} part(s) under '{}' + manifest '{}'",
+                    parts, args.output, manifest_name
+                )
+            },
+            || {
+                serde_json::json!({
+                    "operation": "export",
+                    "status": "ok",
+                    "mode": "split",
+                    "output": args.output,
+                    "format": format.extension(),
+                    "parts": parts,
+                    "manifest": manifest_name,
+                })
+            },
         );
         return Ok(());
     }
@@ -122,9 +149,28 @@ pub(crate) async fn run(args: ExportArgs) -> Result<()> {
     )
     .await?;
 
-    println!(
-        "exported to '{}' ({} bytes written)",
-        args.output, meta.size
+    reporter.finished(ProgressSnapshot {
+        bytes_written: meta.size,
+        elapsed_secs: started.elapsed().as_secs_f64(),
+        ..ProgressSnapshot::default()
+    });
+    reporter.result(
+        || {
+            format!(
+                "exported to '{}' ({} bytes written)",
+                args.output, meta.size
+            )
+        },
+        || {
+            serde_json::json!({
+                "operation": "export",
+                "status": "ok",
+                "mode": "single",
+                "output": args.output,
+                "format": format.extension(),
+                "bytes_written": meta.size,
+            })
+        },
     );
     Ok(())
 }

@@ -11,6 +11,7 @@ use arangodb_import::{
 };
 use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
+use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::{Error, Result};
 use clap::{Args, ValueEnum};
 use futures::StreamExt;
@@ -19,6 +20,7 @@ use tokio_util::io::StreamReader;
 
 use super::connection::ConnectionArgs;
 use super::CompressionArg;
+use crate::output::Reporter;
 
 /// Arguments for `arangox import`.
 #[derive(Debug, Args)]
@@ -118,7 +120,7 @@ impl From<DuplicateMode> for OnDuplicate {
 }
 
 /// Runs an import job.
-pub(crate) async fn run(args: ImportArgs) -> Result<()> {
+pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
     let format = resolve_format(args.format.as_deref(), &args.input)?;
     let kind = if args.edge {
         CollectionKind::Edge
@@ -164,6 +166,7 @@ pub(crate) async fn run(args: ImportArgs) -> Result<()> {
     }
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
 
+    reporter.started("import");
     let started = Instant::now();
     let summary = match args.checkpoint.as_deref() {
         Some(uri) => {
@@ -174,26 +177,60 @@ pub(crate) async fn run(args: ImportArgs) -> Result<()> {
         None => run_import(documents, batch, concurrency, sender).await?,
     };
     let elapsed = started.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
 
-    let docs_per_sec = if elapsed.as_secs_f64() > 0.0 {
-        summary.documents_sent as f64 / elapsed.as_secs_f64()
+    let docs_per_sec = if elapsed_secs > 0.0 {
+        summary.documents_sent as f64 / elapsed_secs
     } else {
         0.0
     };
-    println!(
-        "imported {} document(s) into '{}' in {} batch(es) over {:.2}s ({:.0} docs/s)\n  \
-         created={} errors={} updated={} ignored={} empty={} bytes_sent={}",
-        summary.documents_sent,
-        args.collection,
-        summary.batches,
-        elapsed.as_secs_f64(),
-        docs_per_sec,
-        summary.created,
-        summary.errors,
-        summary.updated,
-        summary.ignored,
-        summary.empty,
-        summary.bytes_sent,
+
+    reporter.finished(ProgressSnapshot {
+        bytes_read: 0,
+        bytes_written: summary.bytes_sent,
+        documents: summary.documents_sent,
+        batches: summary.batches,
+        server_errors: summary.errors,
+        retries: 0,
+        elapsed_secs,
+    });
+
+    let collection = args.collection.clone();
+    reporter.result(
+        || {
+            format!(
+                "imported {} document(s) into '{}' in {} batch(es) over {:.2}s ({:.0} docs/s)\n  \
+                 created={} errors={} updated={} ignored={} empty={} bytes_sent={}",
+                summary.documents_sent,
+                collection,
+                summary.batches,
+                elapsed_secs,
+                docs_per_sec,
+                summary.created,
+                summary.errors,
+                summary.updated,
+                summary.ignored,
+                summary.empty,
+                summary.bytes_sent,
+            )
+        },
+        || {
+            serde_json::json!({
+                "operation": "import",
+                "status": if summary.errors > 0 { "completed_with_errors" } else { "ok" },
+                "collection": args.collection,
+                "documents_sent": summary.documents_sent,
+                "batches": summary.batches,
+                "created": summary.created,
+                "errors": summary.errors,
+                "updated": summary.updated,
+                "ignored": summary.ignored,
+                "empty": summary.empty,
+                "bytes_sent": summary.bytes_sent,
+                "elapsed_secs": elapsed_secs,
+                "docs_per_sec": docs_per_sec,
+            })
+        },
     );
 
     if summary.errors > 0 {
