@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
-    decompress, read_documents, run_import, run_import_with_checkpoint, validate_edge_documents,
+    decompress, read_documents, run_import_with_checkpoint, validate_edge_documents,
     ArangoBatchSender, BatchSender, CheckpointConfig, ImportFormat,
 };
 use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
@@ -166,16 +166,17 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
     }
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
 
+    let checkpoint = match args.checkpoint.as_deref() {
+        Some(uri) => Some(build_checkpoint(uri)?),
+        None => None,
+    };
+    let progress = reporter.progress_sink();
+
     reporter.started("import");
     let started = Instant::now();
-    let summary = match args.checkpoint.as_deref() {
-        Some(uri) => {
-            let checkpoint = build_checkpoint(uri)?;
-            run_import_with_checkpoint(documents, batch, concurrency, sender, Some(checkpoint))
-                .await?
-        }
-        None => run_import(documents, batch, concurrency, sender).await?,
-    };
+    let summary =
+        run_import_with_checkpoint(documents, batch, concurrency, sender, checkpoint, progress)
+            .await?;
     let elapsed = started.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
 

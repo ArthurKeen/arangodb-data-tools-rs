@@ -15,6 +15,7 @@ use arangodb_client::{ArangoClient, ImportOptions, ImportResult};
 use arangodb_storage::{ByteStream, ObjectPath, ObjectStore};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::manifest::ImportCheckpoint;
+use arangodb_tools_core::progress::{ProgressCounters, ProgressEvent, ProgressSink};
 use arangodb_tools_core::{Error, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -24,6 +25,10 @@ use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::batch::{into_batches, Batch};
+
+/// How often a periodic [`ProgressEvent::Progress`] is emitted when a progress
+/// sink is supplied.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Sends one prepared batch to its destination.
 ///
@@ -261,7 +266,7 @@ pub async fn run_import<S>(
 where
     S: Stream<Item = Result<Value>> + Send + 'static,
 {
-    run_import_with_checkpoint(documents, batch_config, concurrency, sender, None).await
+    run_import_with_checkpoint(documents, batch_config, concurrency, sender, None, None).await
 }
 
 /// Runs the import pipeline with optional resumable checkpointing.
@@ -278,6 +283,11 @@ where
 /// The returned [`ImportSummary`] reflects only the work performed by *this*
 /// run; batches skipped on resume are not counted.
 ///
+/// When `progress` is `Some`, a [`ProgressEvent::Progress`] snapshot of
+/// committed documents/bytes/batches is emitted through the sink about once per
+/// second while the import runs. Lifecycle (`started`/`finished`) events are
+/// the caller's responsibility, so the pipeline emits only periodic updates.
+///
 /// # Errors
 /// Returns [`Error::Config`] for invalid configuration (see [`run_import`]), an
 /// error if a provided checkpoint cannot be read, or the first send/parse
@@ -288,6 +298,7 @@ pub async fn run_import_with_checkpoint<S>(
     concurrency: ConcurrencyConfig,
     sender: Arc<dyn BatchSender>,
     checkpoint: Option<CheckpointConfig>,
+    progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ImportSummary>
 where
     S: Stream<Item = Result<Value>> + Send + 'static,
@@ -323,6 +334,29 @@ where
         None => (None, None),
     };
 
+    // Shared progress counters (only allocated when a sink is supplied) plus a
+    // ticker task that snapshots them periodically. Workers update the counters
+    // as batches commit; the caller owns started/finished events.
+    let counters = progress.as_ref().map(|_| Arc::new(ProgressCounters::new()));
+    let progress_ticker = match (&progress, &counters) {
+        (Some(sink), Some(counters)) => {
+            let sink = Arc::clone(sink);
+            let counters = Arc::clone(counters);
+            let started = Instant::now();
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(PROGRESS_INTERVAL);
+                // The first tick fires immediately; skip it so progress reflects
+                // real work rather than an empty snapshot.
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    sink.emit(&ProgressEvent::Progress(counters.snapshot(started)));
+                }
+            }))
+        }
+        _ => None,
+    };
+
     let cap = concurrency.max_in_flight_bytes;
     let semaphore = Arc::new(Semaphore::new(cap.min(Semaphore::MAX_PERMITS)));
     let (tx, rx) = mpsc::channel::<(Batch, OwnedSemaphorePermit)>(concurrency.workers * 2);
@@ -333,6 +367,7 @@ where
         let rx = Arc::clone(&rx);
         let sender = Arc::clone(&sender);
         let done = done_tx.clone();
+        let counters = counters.clone();
         workers.spawn(async move {
             let mut summary = ImportSummary::default();
             loop {
@@ -341,6 +376,11 @@ where
                 let Some((batch, permit)) = next else { break };
                 let result = sender.send(&batch).await?;
                 summary.record(&batch, &result);
+                if let Some(counters) = &counters {
+                    counters.add_documents(batch.documents as u64);
+                    counters.add_bytes_written(batch.byte_len() as u64);
+                    counters.inc_batches();
+                }
                 if let Some(done) = &done {
                     let _ = done
                         .send(BatchDone {
@@ -395,6 +435,11 @@ where
             }
             Err(join_err) => std::panic::resume_unwind(join_err.into_panic()),
         }
+    }
+
+    // Stop the periodic progress ticker now that no more work will complete.
+    if let Some(ticker) = progress_ticker {
+        ticker.abort();
     }
 
     // Workers have all exited, so the checkpoint channel is closed; wait for the
@@ -657,6 +702,7 @@ mod tests {
             concurrency(4, 1 << 20),
             Arc::new(FakeSender::default()) as Arc<dyn BatchSender>,
             Some(eager_checkpoint(Arc::clone(&store), path.clone())),
+            None,
         )
         .await
         .unwrap();
@@ -696,6 +742,7 @@ mod tests {
             concurrency(1, 1 << 20),
             Arc::clone(&recorder) as Arc<dyn BatchSender>,
             Some(eager_checkpoint(Arc::clone(&store), path.clone())),
+            None,
         )
         .await
         .unwrap();
@@ -732,6 +779,7 @@ mod tests {
             concurrency(2, 1 << 20),
             Arc::clone(&recorder) as Arc<dyn BatchSender>,
             Some(eager_checkpoint(Arc::clone(&store), path.clone())),
+            None,
         )
         .await
         .unwrap();
@@ -757,10 +805,45 @@ mod tests {
             concurrency(1, 1 << 20),
             Arc::clone(&recorder) as Arc<dyn BatchSender>,
             Some(eager_checkpoint(Arc::clone(&store), path.clone())),
+            None,
         )
         .await
         .unwrap();
 
         assert_eq!(recorder.indices.lock().unwrap().clone(), vec![1, 2]);
+    }
+
+    /// A progress sink that counts the events it receives.
+    #[derive(Default)]
+    struct CountingSink {
+        events: AtomicU64,
+    }
+
+    impl ProgressSink for CountingSink {
+        fn emit(&self, _event: &ProgressEvent) {
+            self.events.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn import_with_progress_sink_produces_correct_summary() {
+        // Supplying a progress sink must not change results or panic. Periodic
+        // emission is time-based (~1s), so a fast test can't assert a count;
+        // this guards the wiring and that the sink is safe to invoke.
+        let sink = Arc::new(CountingSink::default());
+        let summary = run_import_with_checkpoint(
+            doc_stream(50),
+            batches(1 << 20, 10),
+            concurrency(4, 1 << 20),
+            Arc::new(FakeSender::default()) as Arc<dyn BatchSender>,
+            None,
+            Some(Arc::clone(&sink) as Arc<dyn ProgressSink>),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.documents_sent, 50);
+        // Read the counter to ensure the sink type is exercised end to end.
+        let _ = sink.events.load(Ordering::SeqCst);
     }
 }

@@ -15,8 +15,9 @@
 //! progress sink; [`Reporter::progress`] already renders them.
 
 use std::io::Write;
+use std::sync::Arc;
 
-use arangodb_tools_core::progress::{ProgressEvent, ProgressSnapshot};
+use arangodb_tools_core::progress::{ProgressEvent, ProgressSink, ProgressSnapshot};
 use clap::ValueEnum;
 use serde_json::Value;
 
@@ -69,11 +70,18 @@ impl Reporter {
         });
     }
 
-    /// Emits a periodic `progress` event. Currently unused by the pipelines but
-    /// kept so live progress can be wired in without touching presentation.
+    /// Emits a periodic `progress` event.
     #[allow(dead_code)]
     pub(crate) fn progress(self, snapshot: ProgressSnapshot) {
         self.event(&ProgressEvent::Progress(snapshot));
+    }
+
+    /// Returns a [`ProgressSink`] that renders events through this reporter, or
+    /// `None` in text mode (where mid-run progress is not shown). Pass the
+    /// result into a job pipeline to stream periodic `progress` events.
+    pub(crate) fn progress_sink(self) -> Option<Arc<dyn ProgressSink>> {
+        self.is_json()
+            .then(|| Arc::new(ReporterSink { reporter: self }) as Arc<dyn ProgressSink>)
     }
 
     /// Emits a `finished` lifecycle event carrying final totals.
@@ -89,5 +97,17 @@ impl Reporter {
             OutputMode::Text => println!("{}", text()),
             OutputMode::Json => println!("{}", json()),
         }
+    }
+}
+
+/// A [`ProgressSink`] that renders pipeline events through a [`Reporter`].
+#[derive(Debug)]
+struct ReporterSink {
+    reporter: Reporter,
+}
+
+impl ProgressSink for ReporterSink {
+    fn emit(&self, event: &ProgressEvent) {
+        self.reporter.event(event);
     }
 }

@@ -26,3 +26,5 @@
 /tmp
 /dump
 /scratch
+.prd-drift-queue/
+CLAUDE.md

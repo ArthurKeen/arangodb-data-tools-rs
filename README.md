@@ -88,6 +88,37 @@ arangox restore --database mydb-copy --input ./dump-mydb --create-database
 
 Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
 
+### Machine-readable output (`--output json`)
+
+For programmatic callers (e.g. driving the CLI as a subprocess from Python or Go), pass the global `--output json` flag. The result becomes a single JSON object on **stdout**, newline-delimited progress events stream on **stderr**, and errors are rendered as a JSON object on stderr with a non-zero exit code.
+
+```bash
+arangox --output json import --collection users --input users.jsonl
+```
+
+stdout (the result):
+
+```json
+{"operation":"import","status":"ok","collection":"users","documents_sent":1000,"batches":10,"created":1000,"errors":0,"updated":0,"ignored":0,"empty":0,"bytes_sent":123456,"elapsed_secs":1.23,"docs_per_sec":813.0}
+```
+
+stderr (newline-delimited progress; `import` emits periodic `progress` snapshots):
+
+```json
+{"event":"started","operation":"import"}
+{"event":"progress","bytes_read":0,"bytes_written":65536,"documents":600,"batches":6,"server_errors":0,"retries":0,"elapsed_secs":1.0}
+{"event":"finished","bytes_read":0,"bytes_written":123456,"documents":1000,"batches":10,"server_errors":0,"retries":0,"elapsed_secs":1.23}
+```
+
+All four subcommands emit a JSON result and `started`/`finished` events; periodic mid-run `progress` events are currently emitted by `import` (other tools emit lifecycle events only for now).
+
+### From Python or Go
+
+Two integration paths are supported:
+
+1. **Subprocess + `--output json`** (works for all tools today): run `arangox`, parse stdout for the result, read stderr line-by-line for progress, and use the exit code for success/failure. Language-agnostic.
+2. **Native Python bindings** (sketch): a PyO3/maturin module under [`bindings/python`](bindings/python) binds the import pipeline in-process as `arangox.import_file(...)`, returning a `dict`. See its README for build/usage.
+
 ## Compatibility
 
 - Targets ArangoDB **3.12** and current stable.
