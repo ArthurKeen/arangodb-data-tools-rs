@@ -5,7 +5,8 @@ use std::time::Instant;
 
 use arangodb_client::CursorRequest;
 use arangodb_export::{
-    collection_query, document_stream, run_export, run_split_export, ExportFormat, ManifestMeta,
+    collection_query, document_stream, run_export_with_progress, run_split_export_with_progress,
+    ExportFormat, ManifestMeta,
 };
 use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -99,13 +100,14 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
             source: args.collection.clone().or_else(|| args.query.clone()),
         };
         let documents = document_stream(client, request);
-        let manifest = run_split_export(
+        let manifest = run_split_export_with_progress(
             documents,
             compression,
             store.as_ref(),
             path.as_str(),
             max_part_bytes,
             meta,
+            reporter.progress_sink(),
         )
         .await?;
         let parts = manifest.artifacts.len();
@@ -138,7 +140,7 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
         return Ok(());
     }
 
-    let meta = run_export(
+    let meta = run_export_with_progress(
         &client,
         request,
         format,
@@ -146,6 +148,7 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
         compression,
         store.as_ref(),
         &path,
+        reporter.progress_sink(),
     )
     .await?;
 

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use arangodb_restore::{run_restore, RestoreOptions};
+use arangodb_restore::{run_restore_with_progress, RestoreOptions};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::Result;
 use clap::Args;
@@ -44,7 +44,9 @@ pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
 
     reporter.started("restore");
     let started = Instant::now();
-    let summary = run_restore(&client, store.as_ref(), &options).await?;
+    let summary =
+        run_restore_with_progress(&client, store.as_ref(), &options, reporter.progress_sink())
+            .await?;
 
     reporter.finished(ProgressSnapshot {
         batches: summary.collections as u64,

@@ -10,11 +10,15 @@
 //! collection ordering (`_analyzers` first / `_users` last), vector-index
 //! ordering, and resume are deferred (see `docs/IMPLEMENTATION_PLAN.md`).
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use arangodb_client::ArangoClient;
 use arangodb_storage::{decompress, Compression, ObjectPath, ObjectStore};
 use arangodb_tools_core::manifest::{
     ArtifactKind, Compression as ManifestCompression, DataFormat, Manifest,
 };
+use arangodb_tools_core::progress::{ProgressEvent, ProgressSink, ProgressSnapshot};
 use arangodb_tools_core::{Error, Result};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -50,6 +54,24 @@ pub async fn run_restore(
     store: &dyn ObjectStore,
     options: &RestoreOptions,
 ) -> Result<RestoreSummary> {
+    run_restore_with_progress(client, store, options, None).await
+}
+
+/// Restores a dump, emitting a [`ProgressEvent::Progress`] snapshot after each
+/// collection is restored when `progress` is `Some`. Lifecycle
+/// (`started`/`finished`) events are the caller's responsibility.
+///
+/// # Errors
+/// Returns an error if the manifest is missing/invalid/unsupported, or any
+/// restore request fails.
+pub async fn run_restore_with_progress(
+    client: &ArangoClient,
+    store: &dyn ObjectStore,
+    options: &RestoreOptions,
+    progress: Option<Arc<dyn ProgressSink>>,
+) -> Result<RestoreSummary> {
+    let started = Instant::now();
+
     if let Some(database) = &options.create_database {
         client.create_database(database).await?;
     }
@@ -66,6 +88,7 @@ pub async fn run_restore(
     }
     collections.sort_by_key(|(_, s)| i64::from(s.is_edge));
 
+    let mut done: u64 = 0;
     for (group, structure) in &collections {
         // Create the collection without indexes; restore-collection does not
         // build secondary indexes, so they are created explicitly after data.
@@ -84,6 +107,15 @@ pub async fn run_restore(
                 continue;
             }
             client.create_index(&group.name, index).await?;
+        }
+
+        done += 1;
+        if let Some(sink) = &progress {
+            sink.emit(&ProgressEvent::Progress(ProgressSnapshot {
+                batches: done,
+                elapsed_secs: started.elapsed().as_secs_f64(),
+                ..ProgressSnapshot::default()
+            }));
         }
     }
 

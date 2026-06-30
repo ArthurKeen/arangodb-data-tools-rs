@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use arangodb_dump::{run_dump, DumpOptions};
+use arangodb_dump::{run_dump_with_progress, DumpOptions};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::Result;
 use clap::Args;
@@ -57,7 +57,8 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
 
     reporter.started("dump");
     let started = Instant::now();
-    let manifest = run_dump(&client, store.as_ref(), &options).await?;
+    let manifest =
+        run_dump_with_progress(&client, store.as_ref(), &options, reporter.progress_sink()).await?;
     let collections = manifest
         .artifacts
         .iter()

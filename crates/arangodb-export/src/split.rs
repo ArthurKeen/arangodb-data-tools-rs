@@ -10,10 +10,14 @@
 //! between records yields valid parts. JSON-array and CSV exports use the
 //! single-object [`crate::run_export`] path.
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use arangodb_storage::{compress, ByteStream, Compression, ObjectPath, ObjectStore};
 use arangodb_tools_core::manifest::{
     Artifact, ArtifactKind, Checksum, Compression as ManifestCompression, DataFormat, Manifest,
 };
+use arangodb_tools_core::progress::{ProgressEvent, ProgressSink, ProgressSnapshot};
 use arangodb_tools_core::Result;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -51,6 +55,35 @@ pub async fn run_split_export(
     max_part_bytes: u64,
     meta: ManifestMeta,
 ) -> Result<Manifest> {
+    run_split_export_with_progress(
+        documents,
+        compression,
+        store,
+        base_path,
+        max_part_bytes,
+        meta,
+        None,
+    )
+    .await
+}
+
+/// Like [`run_split_export`], but emits a [`ProgressEvent::Progress`] snapshot
+/// after each part is written when `progress` is `Some`. Lifecycle
+/// (`started`/`finished`) events are the caller's responsibility.
+///
+/// # Errors
+/// Returns an error if encoding, compression, or any write fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_split_export_with_progress(
+    documents: DocumentStream,
+    compression: Compression,
+    store: &dyn ObjectStore,
+    base_path: &str,
+    max_part_bytes: u64,
+    meta: ManifestMeta,
+    progress: Option<Arc<dyn ProgressSink>>,
+) -> Result<Manifest> {
+    let started = Instant::now();
     let mut manifest = Manifest::new(meta.database, meta.tool_version, meta.created_at);
     manifest.source = meta.source;
 
@@ -58,12 +91,14 @@ pub async fn run_split_export(
     let threshold = max_part_bytes.max(1);
     let mut buffer: Vec<u8> = Vec::new();
     let mut part: u32 = 0;
+    let mut bytes_written: u64 = 0;
 
     while let Some(chunk) = lines.next().await {
         buffer.extend_from_slice(&chunk?);
         if buffer.len() as u64 >= threshold {
             let payload = std::mem::take(&mut buffer);
             write_part(store, base_path, part, payload, compression, &mut manifest).await?;
+            emit_part_progress(progress.as_deref(), &manifest, &mut bytes_written, started);
             part += 1;
         }
     }
@@ -71,6 +106,7 @@ pub async fn run_split_export(
     // data object and a well-formed manifest.
     if !buffer.is_empty() || part == 0 {
         write_part(store, base_path, part, buffer, compression, &mut manifest).await?;
+        emit_part_progress(progress.as_deref(), &manifest, &mut bytes_written, started);
     }
 
     let manifest_json = manifest.to_json()?;
@@ -120,6 +156,27 @@ async fn write_part(
         part: Some(part),
     });
     Ok(())
+}
+
+/// Adds the most recently written part's size to `bytes_written` and emits a
+/// progress snapshot (parts written so far + cumulative on-object bytes).
+fn emit_part_progress(
+    sink: Option<&dyn ProgressSink>,
+    manifest: &Manifest,
+    bytes_written: &mut u64,
+    started: Instant,
+) {
+    if let Some(last) = manifest.artifacts.last() {
+        *bytes_written += last.byte_size;
+    }
+    if let Some(sink) = sink {
+        sink.emit(&ProgressEvent::Progress(ProgressSnapshot {
+            bytes_written: *bytes_written,
+            batches: manifest.artifacts.len() as u64,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+            ..ProgressSnapshot::default()
+        }));
+    }
 }
 
 /// Wraps bytes in a single-chunk stream.
@@ -238,6 +295,43 @@ mod tests {
         assert_eq!(lines.len(), 10);
         assert_eq!(lines[0]["i"], 0);
         assert_eq!(lines[9]["i"], 9);
+    }
+
+    #[derive(Default)]
+    struct CountingSink {
+        events: std::sync::atomic::AtomicU64,
+    }
+
+    impl ProgressSink for CountingSink {
+        fn emit(&self, _event: &ProgressEvent) {
+            self.events
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn split_export_emits_one_progress_event_per_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFileSystem::new(dir.path());
+        let sink = Arc::new(CountingSink::default());
+
+        let manifest = run_split_export_with_progress(
+            docs(10),
+            Compression::None,
+            &store,
+            "p/things",
+            30,
+            meta(),
+            Some(Arc::clone(&sink) as Arc<dyn ProgressSink>),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sink.events.load(std::sync::atomic::Ordering::SeqCst),
+            manifest.artifacts.len() as u64,
+            "one progress event per written part"
+        );
     }
 
     #[tokio::test]

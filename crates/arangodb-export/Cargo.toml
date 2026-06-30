@@ -21,7 +21,7 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 csv = "1"
 sha2 = { workspace = true }
 

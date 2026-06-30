@@ -12,12 +12,14 @@
 //! per-shard resume are deferred (see `docs/IMPLEMENTATION_PLAN.md`).
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use arangodb_client::ArangoClient;
 use arangodb_storage::{compress, ByteStream, Compression, ObjectPath, ObjectStore};
 use arangodb_tools_core::manifest::{
     Artifact, ArtifactKind, Checksum, Compression as ManifestCompression, DataFormat, Manifest,
 };
+use arangodb_tools_core::progress::{ProgressEvent, ProgressSink, ProgressSnapshot};
 use arangodb_tools_core::{Error, Result};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -72,12 +74,33 @@ pub async fn run_dump(
     store: &dyn ObjectStore,
     options: &DumpOptions,
 ) -> Result<Manifest> {
+    run_dump_with_progress(client, store, options, None).await
+}
+
+/// Dumps the connected database(s) to `store`, emitting a
+/// [`ProgressEvent::Progress`] snapshot after each collection is written when
+/// `progress` is `Some`. Lifecycle (`started`/`finished`) events are the
+/// caller's responsibility.
+///
+/// # Errors
+/// Returns an error if any inventory/dump request or storage write fails.
+pub async fn run_dump_with_progress(
+    client: &ArangoClient,
+    store: &dyn ObjectStore,
+    options: &DumpOptions,
+    progress: Option<Arc<dyn ProgressSink>>,
+) -> Result<Manifest> {
+    let mut state = DumpProgress {
+        sink: progress.as_deref(),
+        started: Instant::now(),
+        collections: 0,
+    };
     if !options.all_databases {
         let batch = client
             .replication_batch_create(options.batch_ttl_secs)
             .await?;
         // Ensure the batch is released regardless of how the dump finishes.
-        let result = dump_with_batch(client, store, options, &batch).await;
+        let result = dump_with_batch(client, store, options, &batch, &mut state).await;
         let _ = client.replication_batch_delete(&batch).await;
         result
     } else {
@@ -97,8 +120,16 @@ pub async fn run_dump(
                 .await?;
             // Prefix all artifact paths for this database.
             let prefix = format!("databases/{db}/");
-            dump_db_into_manifest(&client_db, store, options, &batch, &prefix, &mut manifest)
-                .await?;
+            dump_db_into_manifest(
+                &client_db,
+                store,
+                options,
+                &batch,
+                &prefix,
+                &mut manifest,
+                &mut state,
+            )
+            .await?;
             let _ = client_db.replication_batch_delete(&batch).await;
         }
 
@@ -113,19 +144,54 @@ pub async fn run_dump(
     }
 }
 
+/// Tracks dump progress across collections (and databases) so a periodic
+/// snapshot can be emitted as each collection completes.
+struct DumpProgress<'a> {
+    sink: Option<&'a dyn ProgressSink>,
+    started: Instant,
+    collections: u64,
+}
+
+impl DumpProgress<'_> {
+    /// Records one completed collection and emits a snapshot if a sink is set.
+    /// `bytes` is the cumulative data-artifact size written so far.
+    fn collection_done(&mut self, bytes: u64) {
+        self.collections += 1;
+        if let Some(sink) = self.sink {
+            sink.emit(&ProgressEvent::Progress(ProgressSnapshot {
+                bytes_written: bytes,
+                batches: self.collections,
+                elapsed_secs: self.started.elapsed().as_secs_f64(),
+                ..ProgressSnapshot::default()
+            }));
+        }
+    }
+}
+
+/// Sums the byte size of all data artifacts recorded so far.
+fn data_bytes(manifest: &Manifest) -> u64 {
+    manifest
+        .artifacts
+        .iter()
+        .filter(|a| a.kind == ArtifactKind::Data)
+        .map(|a| a.byte_size)
+        .sum()
+}
+
 /// The dump body, run inside an active replication batch.
 async fn dump_with_batch(
     client: &ArangoClient,
     store: &dyn ObjectStore,
     options: &DumpOptions,
     batch: &str,
+    progress: &mut DumpProgress<'_>,
 ) -> Result<Manifest> {
     let mut manifest = Manifest::new(
         options.database.clone(),
         options.tool_version.clone(),
         options.created_at.clone(),
     );
-    dump_db_into_manifest(client, store, options, batch, "", &mut manifest).await?;
+    dump_db_into_manifest(client, store, options, batch, "", &mut manifest, progress).await?;
     let manifest_json = manifest.to_json()?;
     store
         .put_stream(
@@ -144,6 +210,7 @@ async fn dump_db_into_manifest(
     batch: &str,
     path_prefix: &str,
     manifest: &mut Manifest,
+    progress: &mut DumpProgress<'_>,
 ) -> Result<()> {
     let inventory = client
         .replication_inventory(batch, options.include_system)
@@ -165,6 +232,8 @@ async fn dump_db_into_manifest(
 
         write_structure_with_prefix(store, path_prefix, &name, collection, manifest).await?;
         write_data_with_prefix(client, store, options, batch, path_prefix, &name, manifest).await?;
+
+        progress.collection_done(data_bytes(manifest));
     }
     Ok(())
 }

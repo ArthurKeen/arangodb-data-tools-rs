@@ -110,7 +110,7 @@ stderr (newline-delimited progress; `import` emits periodic `progress` snapshots
 {"event":"finished","bytes_read":0,"bytes_written":123456,"documents":1000,"batches":10,"server_errors":0,"retries":0,"elapsed_secs":1.23}
 ```
 
-All four subcommands emit a JSON result and `started`/`finished` events; periodic mid-run `progress` events are currently emitted by `import` (other tools emit lifecycle events only for now).
+All four subcommands emit a JSON result, `started`/`finished` events, and mid-run `progress` events: `import` and single-file `export` emit time-based snapshots (~1s), while `dump`, `restore`, and split `export` emit a snapshot as each collection/part completes.
 
 ### From Python or Go
 
