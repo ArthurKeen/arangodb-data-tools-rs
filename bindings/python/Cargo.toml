@@ -25,4 +25,10 @@ tokio = { version = "1", features = ["full"] }
 
 arangodb-tools-core = { path = "../../crates/arangodb-tools-core" }
 arangodb-client = { path = "../../crates/arangodb-client" }
+arangodb-storage = { path = "../../crates/arangodb-storage" }
 arangodb-import = { path = "../../crates/arangodb-import" }
+arangodb-export = { path = "../../crates/arangodb-export" }
+arangodb-dump = { path = "../../crates/arangodb-dump" }
+arangodb-restore = { path = "../../crates/arangodb-restore" }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting"] }

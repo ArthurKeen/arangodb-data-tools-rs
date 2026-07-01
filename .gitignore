@@ -28,3 +28,6 @@
 /scratch
 .prd-drift-queue/
 CLAUDE.md
+
+# Generated docs
+*.pdf

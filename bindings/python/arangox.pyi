@@ -1,14 +1,15 @@
-"""Type stubs for the `arangox` extension module (sketch).
+"""Type stubs for the `arangox` extension module.
 
-Only `import_file` is implemented; `export`/`dump`/`restore` raise
-`NotImplementedError` for now.
+Each function builds a client, runs the corresponding async pipeline to
+completion (releasing the GIL during I/O), and returns a result dict.
 """
 
-from typing import Any, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 __version__: str
 
 class ImportSummary(TypedDict):
+    operation: str
     documents_sent: int
     batches: int
     created: int
@@ -41,6 +42,49 @@ def import_file(
     threads: Optional[int] = ...,
     max_in_flight_bytes: Optional[int] = ...,
 ) -> ImportSummary: ...
-def export(**kwargs: Any) -> None: ...
-def dump(**kwargs: Any) -> None: ...
-def restore(**kwargs: Any) -> None: ...
+def export(
+    output: str,
+    *,
+    collection: Optional[str] = ...,
+    query: Optional[str] = ...,
+    bind_vars: Optional[str] = ...,
+    format: Optional[str] = ...,
+    fields: Optional[List[str]] = ...,
+    compression: Optional[str] = ...,
+    batch_size: int = ...,
+    split_bytes: Optional[int] = ...,
+    endpoint: Optional[str] = ...,
+    database: Optional[str] = ...,
+    username: Optional[str] = ...,
+    password: Optional[str] = ...,
+    token: Optional[str] = ...,
+    insecure: bool = ...,
+    request_timeout_secs: int = ...,
+) -> Dict[str, Any]: ...
+def dump(
+    output: str,
+    *,
+    include_system: bool = ...,
+    compression: Optional[str] = ...,
+    batch_ttl_secs: int = ...,
+    endpoint: Optional[str] = ...,
+    database: Optional[str] = ...,
+    username: Optional[str] = ...,
+    password: Optional[str] = ...,
+    token: Optional[str] = ...,
+    insecure: bool = ...,
+    request_timeout_secs: int = ...,
+) -> Dict[str, Any]: ...
+def restore(
+    input: str,
+    *,
+    create_database: bool = ...,
+    overwrite: bool = ...,
+    endpoint: Optional[str] = ...,
+    database: Optional[str] = ...,
+    username: Optional[str] = ...,
+    password: Optional[str] = ...,
+    token: Optional[str] = ...,
+    insecure: bool = ...,
+    request_timeout_secs: int = ...,
+) -> Dict[str, Any]: ...
