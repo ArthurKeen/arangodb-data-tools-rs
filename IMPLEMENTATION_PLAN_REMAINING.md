@@ -1,6 +1,6 @@
 # ArangoDB Data Tools (Rust) — Remaining Implementation Plan
 
-**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models, blank-node provenance scoping, and N-Quads named-graph routing; only RDF/XML+TriG and the 100K-triple benchmark remain deferred). Phase 5 nearly complete: all-database dump, import resume, **multi-database restore (5.1)**, **restore resume (5.3)**, **split for jsonl/json/csv (5.4)**, **adaptive batching / rate-limit governor (5.5)**, **collection filters (5.6)**, and **retry tuning (5.7)** are done; only multipart restart-resume (S3-specific) is deferred. Phase 7 (cloud backends) not started.
+**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models, blank-node provenance scoping, and N-Quads named-graph routing; only RDF/XML+TriG and the 100K-triple benchmark remain deferred). Phase 5 nearly complete: all-database dump, import resume, **multi-database restore (5.1)**, **restore resume (5.3)**, **split for jsonl/json/csv (5.4)**, **adaptive batching / rate-limit governor (5.5)**, **collection filters (5.6)**, and **retry tuning (5.7)** are done; only multipart restart-resume (S3-specific) is deferred. Phase 7 (cloud backends): GCS (`gs://`) and Azure (`az://`) wired and documented, SeaweedFS via `seaweed+s3://`; remaining work is live nightly CI, a cross-backend matrix, throughput baselines, and multipart restart-resume.
 
 ---
 
@@ -504,22 +504,21 @@ Still out of scope:
 
 Phase 2 delivered S3-compatible (MinIO) support via `object_store` crate. Phase 7 extends to Google Cloud Storage (GCS), Azure Blob Storage, and documents SeaweedFS (S3-compatible first). The goal is feature parity across backends and clear deployment docs.
 
+**Status:** GCS (`gs://`) and Azure (`az://`) backends are wired through the shared `ObjectStore` abstraction and available across all commands (inputs, outputs, dump/restore roots, and checkpoints); SeaweedFS is supported via `seaweed+s3://` (S3 gateway) and documented. Scheme dispatch is centralized in `arangodb-storage` (`ObjectStoreBackend::for_bucket`/`for_prefix`) and reused by the CLI (`commands::open_object`/`open_store_root`) and the Python bindings. `docs/backends.md` covers setup per backend. **Remaining/deferred:** live nightly integration CI for GCS/Azure/SeaweedFS, a cross-backend feature matrix, throughput baselines, and restart-resumable multipart uploads.
+
 ### 7.1 Google Cloud Storage (GCS)
 
 **Current state:** `object_store` supports GCS via `GoogleCloudStorage` variant.
 
 **Deliverables:**
-- [ ] Feature gate: `feature = "gcs"` (optional, disabled by default; nightly CI).
-- [ ] URI parsing: `gs://bucket/prefix` → `GoogleCloudStorage` backend.
-- [ ] Credentials: GOOGLE_APPLICATION_CREDENTIALS (JSON keyfile path) or Application Default Credentials.
+- [x] Enabled via the `object_store` `gcp` feature (always on; no separate cargo feature gate needed).
+- [x] URI parsing: `gs://bucket/prefix` → `GoogleCloudStorage` backend (`ObjectStoreBackend::gcs`).
+- [x] Credentials: `GOOGLE_SERVICE_ACCOUNT`/`GOOGLE_SERVICE_ACCOUNT_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` (via `from_env`).
 - [ ] Testing:
-  - [ ] Unit: URI parsing for GCS schemes.
+  - [x] Unit: URI parsing + backend selection for GCS.
   - [ ] Integration (nightly): create GCS bucket, import/export/dump/restore cycle.
   - [ ] Verify multipart handling (large object split across GCS resumable uploads).
-- [ ] Docs:
-  - [ ] Setup guide: create service account, download keyfile, set env var.
-  - [ ] Example: `arangox import --endpoint arangodb.example.com --database test --collection items gs://my-bucket/items.jsonl`.
-  - [ ] Limitations (e.g., resumable uploads via application default credentials have specific token expiry).
+- [x] Docs: setup guide, examples, and limitations in `docs/backends.md`.
 
 **API shape (transparent via `StorageUri`):**
 ```rust
@@ -543,15 +542,13 @@ storage.put_stream(&path, stream).await?;
 **Current state:** `object_store` supports Azure via `MicrosoftAzure` variant.
 
 **Deliverables:**
-- [ ] Feature gate: `feature = "azure"`.
-- [ ] URI parsing: `azure://container/prefix` (or `abfs://` variant) → `MicrosoftAzure` backend.
-- [ ] Credentials: `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY` or Managed Identity (IMDS).
+- [x] Enabled via the `object_store` `azure` feature (always on).
+- [x] URI parsing: `az://container/prefix` → `MicrosoftAzure` backend (`ObjectStoreBackend::azure`).
+- [x] Credentials: `AZURE_STORAGE_ACCOUNT_NAME` + `AZURE_STORAGE_ACCOUNT_KEY`, SAS token, or Azurite emulator (via `from_env`).
 - [ ] Testing:
-  - [ ] Unit: URI parsing.
+  - [x] Unit: URI parsing + backend selection for Azure.
   - [ ] Integration (nightly): create Azure storage account + container, round-trip.
-- [ ] Docs:
-  - [ ] Setup: storage account, key retrieval, env var setup.
-  - [ ] Example: `arangox dump --endpoint arangodb.example.com azure://myaccount/backup --all-databases`.
+- [x] Docs: setup, credentials, and examples in `docs/backends.md`.
 
 **Testing:**
 - [ ] Integration: dump/restore via Azure.
@@ -567,13 +564,9 @@ storage.put_stream(&path, stream).await?;
 **Current state:** SeaweedFS exposes an S3-compatible API; `object_store` S3 backend can use S3-compatible endpoints.
 
 **Deliverables:**
-- [ ] Document path: use S3 backend with custom `--s3-endpoint` flag pointing to SeaweedFS S3 gateway.
-- [ ] Example config: SeaweedFS running on `seaweedfs.local:33333`; `--s3-endpoint http://seaweedfs.local:33333`.
-- [ ] Integration test (optional, gate behind feature): spin up SeaweedFS in Docker, round-trip.
-- [ ] Docs:
-  - [ ] SeaweedFS deployment (single node vs cluster).
-  - [ ] S3 gateway setup and performance notes.
-  - [ ] Example: `arangox import --endpoint arangodb.example.com --s3-endpoint http://seaweedfs.local:33333 s3://bucket/items.jsonl`.
+- [x] Supported via the S3-compatible backend, exposed as the `seaweed+s3://` scheme; point `AWS_ENDPOINT` at the SeaweedFS S3 gateway (and `AWS_ALLOW_HTTP=true` for plain HTTP).
+- [x] Docs: S3-gateway setup and examples in `docs/backends.md`.
+- [ ] Integration test (optional): spin up SeaweedFS in Docker, round-trip.
 
 **Testing:**
 - [ ] Integration (optional): SeaweedFS Docker container, round-trip.
@@ -605,12 +598,11 @@ storage.put_stream(&path, stream).await?;
 ### 7.5 Backend-Specific Documentation
 
 **Deliverables:**
-- [ ] `docs/backends.md`:
-  - [ ] Architecture (how `StorageUri` detects and routes to backends).
-  - [ ] Feature matrix (which backends support resumable uploads, multipart, etc.).
-  - [ ] Setup per backend with real examples.
-  - [ ] Troubleshooting (credential errors, endpoint misconfiguration, etc.).
-  - [ ] Performance recommendations (batch size, concurrency tuning per cloud provider).
+- [x] `docs/backends.md`:
+  - [x] Architecture (how `StorageUri` detects and routes to backends).
+  - [x] Setup per backend with real examples.
+  - [x] URI reference and where each location kind is accepted.
+  - [ ] Full troubleshooting + per-provider performance tuning (follow-up).
 
 **Exit criteria:**
 - Docs complete; examples tested (at least locally).
@@ -716,8 +708,22 @@ storage.put_stream(&path, stream).await?;
 
 ## Appendix: API Stability Checklist
 
-- [ ] All public types in Phase 5–7 crates serialize/deserialize correctly (manifest, checkpoint, etc.).
-- [ ] Breaking changes documented (if any).
-- [ ] CLI flags finalized before public release.
-- [ ] Error messages stable and user-friendly.
+- [x] All public types in Phase 5–7 crates serialize/deserialize correctly (manifest, checkpoint, etc.) — round-trip tests in `arangodb-tools-core::manifest`.
+- [x] CLI flags finalized before public release (import/export/dump/restore/rdf, incl. adaptive, retry, split, filters, named-graph, blank-node-scope).
+- [x] Error messages stable and user-friendly (structured `Error` with context).
+- [ ] Breaking changes documented (n/a for the initial `0.1.0` release).
+
+## Appendix: Release Polish (crates.io readiness)
+
+- [x] Version bumped from `0.0.0` to `0.1.0` (workspace-wide).
+- [x] Internal path dependencies declared in `[workspace.dependencies]` with both
+  `path` and `version` so crates are publishable (path is dropped on publish).
+- [x] `keywords` and `categories` added (inherited from `[workspace.package]`).
+- [x] Per-crate `README.md` for each published crate (shown on the crates.io page).
+- [x] `cargo package` metadata validated (leaf `arangodb-tools-core` packages
+  clean; dependents package once their deps are published, leaf-first).
+
+**Publish order (leaf-first):** `arangodb-tools-core` → `arangodb-client`,
+`arangodb-storage` → `arangodb-import` → `arangodb-export`, `arangodb-dump` →
+`arangodb-restore`, `arangodb-rdf` → `arangodb-tools-cli`.
 

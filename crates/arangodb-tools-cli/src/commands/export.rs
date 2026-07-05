@@ -1,6 +1,5 @@
 //! The `arangox export` subcommand.
 
-use std::path::Path;
 use std::time::Instant;
 
 use arangodb_client::CursorRequest;
@@ -8,7 +7,7 @@ use arangodb_export::{
     collection_query, document_stream, run_export_with_progress, run_split_export_with_progress,
     ExportFormat, ManifestMeta,
 };
-use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
+use arangodb_storage::{ObjectPath, ObjectStore};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::{Error, Result};
 use clap::Args;
@@ -203,43 +202,10 @@ fn build_request(
 
 /// Resolves an output destination into a store and an object path.
 ///
-/// Accepts a filesystem path, a `file://` URI, or `s3://bucket/key`. Other
-/// object-storage schemes are not supported yet.
+/// Accepts a filesystem path, a `file://` URI, or an object-storage URI
+/// (`s3://`, `gs://`, `az://`, `seaweed+s3://`).
 fn open_output(output: &str) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
-    if let Some((scheme, _)) = output.split_once("://") {
-        return match scheme {
-            "file" => open_local(Path::new(output.trim_start_matches("file://"))),
-            "s3" => {
-                let parsed = StorageUri::parse(output)?;
-                let bucket = parsed.bucket.ok_or_else(|| {
-                    Error::config(format!("s3 URI is missing a bucket: {output}"))
-                })?;
-                let backend = ObjectStoreBackend::s3(&bucket, None)?;
-                Ok((Box::new(backend), ObjectPath::new(parsed.path)))
-            }
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; \
-                 use s3:// or a local path"
-            ))),
-        };
-    }
-    open_local(Path::new(output))
-}
-
-/// Resolves a local output path to a [`LocalFileSystem`] rooted at its parent
-/// directory and an object path of just the file name.
-fn open_local(path: &Path) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
-    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-        Error::config(format!("output path has no file name: {}", path.display()))
-    })?;
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    Ok((
-        Box::new(LocalFileSystem::new(parent)),
-        ObjectPath::new(file_name.to_string()),
-    ))
+    super::open_object(output)
 }
 
 #[cfg(test)]
@@ -247,9 +213,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_unsupported_output_scheme() {
+    fn rejects_unknown_output_scheme() {
+        // gs://, az://, s3://, seaweed+s3:// are supported; an unknown scheme is
+        // rejected by URI parsing.
         assert!(matches!(
-            open_output("gs://bucket/out.jsonl"),
+            open_output("ftp://host/out.jsonl"),
             Err(Error::Config(_))
         ));
     }

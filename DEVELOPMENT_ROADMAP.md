@@ -141,7 +141,7 @@ Q2 (In Progress)
 
 ## Phase 7: Cloud Backends
 
-**Status:** Not started  
+**Status:** In progress — GCS (`gs://`) and Azure (`az://`) backends wired through the shared `ObjectStore` abstraction and available across all commands (inputs, outputs, dump/restore roots, checkpoints); SeaweedFS supported via `seaweed+s3://` and documented; scheme dispatch centralized in `arangodb-storage` and reused by the CLI + Python bindings; `docs/backends.md` added. Remaining: live nightly integration CI for GCS/Azure/SeaweedFS, a cross-backend feature matrix, throughput baselines, and restart-resumable multipart uploads.  
 **Duration:** 3–4 weeks  
 **Dependency:** Phase 4 complete (storage trait stable)  
 **Owned by:** [TBD]  

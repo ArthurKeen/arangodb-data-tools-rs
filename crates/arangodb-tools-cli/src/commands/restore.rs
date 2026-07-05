@@ -1,13 +1,11 @@
 //! The `arangox restore` subcommand.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use arangodb_restore::{run_restore_with_progress, RestoreCheckpointConfig, RestoreOptions};
-use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::progress::ProgressSnapshot;
-use arangodb_tools_core::{Error, Result};
+use arangodb_tools_core::Result;
 use clap::Args;
 
 use super::connection::ConnectionArgs;
@@ -91,52 +89,17 @@ pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
 }
 
 /// Builds a [`RestoreCheckpointConfig`] from a checkpoint location (a local
-/// path, a `file://` URI, or `s3://bucket/key`). Mirrors the import command's
-/// checkpoint handling.
+/// path, a `file://` URI, or an object-storage URI: `s3://`, `gs://`, `az://`,
+/// `seaweed+s3://`). Mirrors the import command's checkpoint handling.
 fn build_restore_checkpoint(uri: &str) -> Result<RestoreCheckpointConfig> {
-    let (store, path): (Arc<dyn ObjectStore>, ObjectPath) = match uri.split_once("://") {
-        Some(("s3", _)) => {
-            let parsed = StorageUri::parse(uri)?;
-            let bucket = parsed.bucket.ok_or_else(|| {
-                Error::config(format!("s3 checkpoint URI is missing a bucket: {uri}"))
-            })?;
-            let backend = ObjectStoreBackend::s3(&bucket, None)?;
-            (Arc::new(backend), ObjectPath::new(parsed.path))
-        }
-        Some(("file", _)) => local_checkpoint(Path::new(uri.trim_start_matches("file://")))?,
-        Some((other, _)) => {
-            return Err(Error::config(format!(
-                "checkpoint scheme '{other}://' is not supported; use a local path or s3://"
-            )));
-        }
-        None => local_checkpoint(Path::new(uri))?,
-    };
-    Ok(RestoreCheckpointConfig::new(store, path))
-}
-
-/// Resolves a local checkpoint path into a filesystem-backed store (rooted at
-/// the path's parent) and the file name as its object path.
-fn local_checkpoint(path: &Path) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            Error::config(format!(
-                "checkpoint path has no file name: {}",
-                path.display()
-            ))
-        })?;
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
-    };
-    let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new(parent));
-    Ok((store, ObjectPath::new(file_name.to_owned())))
+    let (store, path) = super::open_object(uri)?;
+    Ok(RestoreCheckpointConfig::new(Arc::from(store), path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arangodb_tools_core::Error;
 
     #[test]
     fn builds_local_checkpoint_with_file_name_object() {
@@ -145,9 +108,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_checkpoint_scheme() {
+    fn rejects_unknown_checkpoint_scheme() {
         assert!(matches!(
-            build_restore_checkpoint("gs://bucket/cp.json"),
+            build_restore_checkpoint("ftp://host/cp.json"),
             Err(Error::Config(_))
         ));
     }

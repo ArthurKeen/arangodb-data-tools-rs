@@ -7,7 +7,6 @@ use arangodb_import::decompress;
 use arangodb_rdf::{
     import_rdf_with_progress, GraphModel, NamedGraphMode, RdfFormat, RdfLiteralPolicy, RdfOptions,
 };
-use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{default_workers, BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::{Error, Result};
@@ -326,22 +325,19 @@ fn format_name(format: RdfFormat) -> &'static str {
     }
 }
 
-/// Opens the RDF input as an async byte stream (file, stdin, `file://`, or
-/// `s3://bucket/key`). Mirrors the `import` subcommand's input handling.
+/// Opens the RDF input as an async byte stream (file, stdin, `file://`, or an
+/// object-storage URI: `s3://`, `gs://`, `az://`, `seaweed+s3://`). Mirrors the
+/// `import` subcommand's input handling.
 async fn open_input(input: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     if input == "-" {
         return Ok(Box::new(tokio::io::stdin()));
     }
 
     if let Some((scheme, _)) = input.split_once("://") {
-        return match scheme {
-            "file" => open_file(Path::new(input.trim_start_matches("file://"))).await,
-            "s3" => open_s3(input).await,
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; \
-                 use s3://, a local path, or '-' for stdin"
-            ))),
-        };
+        if scheme == "file" {
+            return open_file(Path::new(input.trim_start_matches("file://"))).await;
+        }
+        return open_object_stream(input).await;
     }
     open_file(Path::new(input)).await
 }
@@ -354,16 +350,10 @@ async fn open_file(path: &Path) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     Ok(Box::new(file))
 }
 
-/// Opens an `s3://bucket/key` object as a byte stream via the storage backend.
-async fn open_s3(uri: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
-    let parsed = StorageUri::parse(uri)?;
-    let bucket = parsed
-        .bucket
-        .ok_or_else(|| Error::config(format!("s3 URI is missing a bucket: {uri}")))?;
-    let backend = ObjectStoreBackend::s3(&bucket, None)?;
-    let stream = backend
-        .get_stream(&ObjectPath::new(parsed.path), None)
-        .await?;
+/// Opens an object-storage URI as a byte stream via the storage backend.
+async fn open_object_stream(uri: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    let (store, path) = super::open_object(uri)?;
+    let stream = store.get_stream(&path, None).await?;
     let reader = StreamReader::new(
         stream.map(|chunk| chunk.map_err(|err| std::io::Error::other(err.to_string()))),
     );
@@ -432,9 +422,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unsupported_object_scheme() {
+    async fn rejects_unknown_object_scheme() {
+        // s3/gs/az/seaweed+s3 are supported; an unknown scheme is rejected by
+        // URI parsing.
         assert!(matches!(
-            open_input("gs://bucket/graph.nt").await,
+            open_input("ftp://host/graph.nt").await,
             Err(Error::Config(_))
         ));
     }

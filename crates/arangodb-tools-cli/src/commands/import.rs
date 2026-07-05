@@ -9,7 +9,6 @@ use arangodb_import::{
     decompress, read_documents, run_import_with_checkpoint, validate_edge_documents,
     ArangoBatchSender, BatchSender, CheckpointConfig, ImportFormat,
 };
-use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::{Error, Result};
@@ -269,70 +268,29 @@ fn resolve_format(explicit: Option<&str>, input: &str) -> Result<ImportFormat> {
 
 /// Builds a [`CheckpointConfig`] from a checkpoint location.
 ///
-/// Accepts a local filesystem path, a `file://` URI, or an `s3://bucket/key`
-/// URI. The checkpoint is a single object that is overwritten as the import
-/// makes progress.
+/// Accepts a local filesystem path, a `file://` URI, or an object-storage URI
+/// (`s3://`, `gs://`, `az://`, `seaweed+s3://`). The checkpoint is a single
+/// object that is overwritten as the import makes progress.
 fn build_checkpoint(uri: &str) -> Result<CheckpointConfig> {
-    let (store, path): (Arc<dyn ObjectStore>, ObjectPath) = match uri.split_once("://") {
-        Some(("s3", _)) => {
-            let parsed = StorageUri::parse(uri)?;
-            let bucket = parsed.bucket.ok_or_else(|| {
-                Error::config(format!("s3 checkpoint URI is missing a bucket: {uri}"))
-            })?;
-            let backend = ObjectStoreBackend::s3(&bucket, None)?;
-            (Arc::new(backend), ObjectPath::new(parsed.path))
-        }
-        Some(("file", _)) => local_checkpoint(Path::new(uri.trim_start_matches("file://")))?,
-        Some((other, _)) => {
-            return Err(Error::config(format!(
-                "checkpoint scheme '{other}://' is not supported; use a local path or s3://"
-            )));
-        }
-        None => local_checkpoint(Path::new(uri))?,
-    };
-    Ok(CheckpointConfig::new(store, path))
-}
-
-/// Resolves a local checkpoint path into a filesystem-backed store (rooted at
-/// the path's parent) and the file name as its object path.
-fn local_checkpoint(path: &Path) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            Error::config(format!(
-                "checkpoint path has no file name: {}",
-                path.display()
-            ))
-        })?;
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
-    };
-    let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new(parent));
-    Ok((store, ObjectPath::new(file_name.to_owned())))
+    let (store, path) = super::open_object(uri)?;
+    Ok(CheckpointConfig::new(Arc::from(store), path))
 }
 
 /// Opens the import input as an async byte stream.
 ///
 /// Accepts a filesystem path, `-` for standard input, a `file://` URI, or an
-/// `s3://bucket/key` URI (credentials/region/endpoint from the `AWS_*`
-/// environment; works against S3 and MinIO/LocalStack). Other object-storage
-/// schemes (`gs://`, `az://`) are not supported yet.
+/// object-storage URI (`s3://`, `gs://`, `az://`, `seaweed+s3://`). Object-store
+/// credentials come from each backend's standard environment variables.
 async fn open_input(input: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     if input == "-" {
         return Ok(Box::new(tokio::io::stdin()));
     }
 
     if let Some((scheme, _)) = input.split_once("://") {
-        return match scheme {
-            "file" => open_file(Path::new(input.trim_start_matches("file://"))).await,
-            "s3" => open_s3(input).await,
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; \
-                 use s3://, a local path, or '-' for stdin"
-            ))),
-        };
+        if scheme == "file" {
+            return open_file(Path::new(input.trim_start_matches("file://"))).await;
+        }
+        return open_object_stream(input).await;
     }
     open_file(Path::new(input)).await
 }
@@ -345,16 +303,10 @@ async fn open_file(path: &Path) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     Ok(Box::new(file))
 }
 
-/// Opens an `s3://bucket/key` object as a byte stream via the storage backend.
-async fn open_s3(uri: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
-    let parsed = StorageUri::parse(uri)?;
-    let bucket = parsed
-        .bucket
-        .ok_or_else(|| Error::config(format!("s3 URI is missing a bucket: {uri}")))?;
-    let backend = ObjectStoreBackend::s3(&bucket, None)?;
-    let stream = backend
-        .get_stream(&ObjectPath::new(parsed.path), None)
-        .await?;
+/// Opens an object-storage URI as a byte stream via the storage backend.
+async fn open_object_stream(uri: &str) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    let (store, path) = super::open_object(uri)?;
+    let stream = store.get_stream(&path, None).await?;
     // Adapt the byte stream into an AsyncRead for the format readers.
     let reader = StreamReader::new(
         stream.map(|chunk| chunk.map_err(|err| std::io::Error::other(err.to_string()))),
@@ -391,11 +343,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unsupported_object_scheme() {
-        // gs:// is not wired yet; s3:// is handled elsewhere (needs a server).
-        // `Box<dyn AsyncRead>` is not Debug, so match rather than unwrap_err.
+    async fn rejects_unknown_object_scheme() {
+        // s3/gs/az/seaweed+s3 are supported; an unknown scheme is rejected by
+        // URI parsing. `Box<dyn AsyncRead>` is not Debug, so match rather than
+        // unwrap_err.
         assert!(matches!(
-            open_input("gs://bucket/users.jsonl").await,
+            open_input("ftp://host/users.jsonl").await,
             Err(Error::Config(_))
         ));
     }
@@ -421,9 +374,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_checkpoint_scheme() {
+    fn rejects_unknown_checkpoint_scheme() {
         assert!(matches!(
-            build_checkpoint("gs://bucket/cp.json"),
+            build_checkpoint("ftp://host/cp.json"),
             Err(Error::Config(_))
         ));
     }

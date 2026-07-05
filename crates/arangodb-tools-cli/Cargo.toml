@@ -8,7 +8,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true
@@ -18,14 +20,14 @@ name = "arangox"
 path = "src/main.rs"
 
 [dependencies]
-arangodb-tools-core = { path = "../arangodb-tools-core" }
-arangodb-client = { path = "../arangodb-client" }
-arangodb-storage = { path = "../arangodb-storage" }
-arangodb-import = { path = "../arangodb-import" }
-arangodb-export = { path = "../arangodb-export" }
-arangodb-dump = { path = "../arangodb-dump" }
-arangodb-restore = { path = "../arangodb-restore" }
-arangodb-rdf = { path = "../arangodb-rdf" }
+arangodb-tools-core = { workspace = true }
+arangodb-client = { workspace = true }
+arangodb-storage = { workspace = true }
+arangodb-import = { workspace = true }
+arangodb-export = { workspace = true }
+arangodb-dump = { workspace = true }
+arangodb-restore = { workspace = true }
+arangodb-rdf = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }

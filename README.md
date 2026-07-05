@@ -26,7 +26,7 @@ This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATI
 |-------|---------|--------|
 | `arangodb-tools-core` | Shared config, errors, retry, concurrency, progress, manifest types | Implemented |
 | `arangodb-client` | ArangoDB HTTP client (connection, auth, TLS, version, collections, cursor, import, replication) | Implemented |
-| `arangodb-storage` | `ObjectStore` abstraction: local FS and S3-compatible (via `object_store`), plus URI parsing and compression | Local FS + S3-compatible |
+| `arangodb-storage` | `ObjectStore` abstraction: local FS, S3-compatible, GCS, and Azure (via `object_store`), plus URI parsing and compression | Local FS + S3/GCS/Azure |
 | `arangodb-import` | Streaming bulk import (CSV/TSV/JSON/JSONL) with bounded batching and resumable checkpointing | Implemented |
 | `arangodb-export` | Export via AQL cursors (JSONL/JSON/CSV), with optional size-split JSONL + manifest | Implemented |
 | `arangodb-dump` | Database dump (manifest-driven) | Implemented |
@@ -34,7 +34,7 @@ This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATI
 | `arangodb-rdf` | RDF bulk import into a property graph (N-Triples, N-Quads, Turtle) | Implemented |
 | `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore`, `rdf` subcommands | Implemented |
 
-> Storage backends: local filesystem and S3-compatible object stores (AWS S3, MinIO/LocalStack, SeaweedFS via its S3 gateway) are wired today through `AWS_*` environment configuration. GCS (`gs://`) and Azure (`az://`) are planned and currently rejected with a clear error.
+> Storage backends: local filesystem, S3-compatible (AWS S3, MinIO/LocalStack, SeaweedFS via its S3 gateway), Google Cloud Storage (`gs://`), and Azure Blob Storage (`az://`) are all wired, each configured from its standard environment variables. See [`docs/backends.md`](docs/backends.md).
 
 ## Building
 
@@ -132,7 +132,19 @@ arangox rdf import --database mydb --graph-model rpt \
 
 The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star, RDFS/OWL inference, `rdf:type`-based collection bucketing, RDF/XML and TriG, and ArangoDB→RDF export are not (yet) supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered (under `--named-graph collection` edges are buffered per collection instead).
 
-Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
+### Storage backends
+
+Every subcommand accepts local paths and object-storage URIs for inputs, outputs, dump roots, and checkpoints. Supported schemes:
+
+| Scheme | Backend | Credentials (environment) |
+| --- | --- | --- |
+| _(path)_ / `file://` | Local filesystem | — |
+| `s3://` | S3-compatible (AWS S3, MinIO, LocalStack) | `AWS_*` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ENDPOINT`, `AWS_ALLOW_HTTP`) |
+| `seaweed+s3://` | SeaweedFS via its S3 gateway | `AWS_*` with `AWS_ENDPOINT` pointing at the gateway (and `AWS_ALLOW_HTTP=true` for plain HTTP) |
+| `gs://` | Google Cloud Storage | `GOOGLE_SERVICE_ACCOUNT` / `GOOGLE_SERVICE_ACCOUNT_KEY` or `GOOGLE_APPLICATION_CREDENTIALS` |
+| `az://` | Azure Blob Storage | `AZURE_STORAGE_ACCOUNT_NAME` with `AZURE_STORAGE_ACCOUNT_KEY`, a SAS token, or `AZURE_STORAGE_USE_EMULATOR` (Azurite) |
+
+Credentials are resolved from the environment; secrets are never passed on the command line. See [`docs/backends.md`](docs/backends.md) for per-backend setup and examples.
 
 ### Machine-readable output (`--output json`)
 

@@ -8,13 +8,15 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-arangodb-tools-core = { path = "../arangodb-tools-core" }
+arangodb-tools-core = { workspace = true }
 bytes = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 serde = { workspace = true }

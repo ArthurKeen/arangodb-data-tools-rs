@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use object_store::aws::AmazonS3Builder;
+use object_store::azure::MicrosoftAzureBuilder;
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as OsPath;
 use object_store::{
     buffered::BufWriter, GetOptions, GetRange, ObjectStore as OsObjectStore, ObjectStoreExt,
@@ -23,6 +25,7 @@ use tokio::io::AsyncWriteExt;
 use crate::store::{
     ByteRange, ByteStream, MetadataStream, ObjectMetadata, ObjectPath, ObjectStore,
 };
+use crate::uri::{StorageScheme, StorageUri};
 
 /// Part size for streaming multipart uploads (8 MiB; above S3's 5 MiB floor).
 const UPLOAD_PART_SIZE: usize = 8 * 1024 * 1024;
@@ -68,6 +71,81 @@ impl ObjectStoreBackend {
             .build()
             .map_err(map_os_error)?;
         Ok(Self::new(Arc::new(s3), prefix))
+    }
+
+    /// Builds a Google Cloud Storage backend for `bucket`, optionally scoped to
+    /// a key `prefix`.
+    ///
+    /// Connection settings are read from the standard `GOOGLE_*` environment
+    /// variables (e.g. `GOOGLE_SERVICE_ACCOUNT` / `GOOGLE_SERVICE_ACCOUNT_KEY`,
+    /// or `GOOGLE_APPLICATION_CREDENTIALS`).
+    ///
+    /// # Errors
+    /// Returns [`Error::Storage`] if the backend cannot be constructed.
+    pub fn gcs(bucket: &str, prefix: Option<String>) -> Result<Self> {
+        let gcs = GoogleCloudStorageBuilder::from_env()
+            .with_bucket_name(bucket)
+            .build()
+            .map_err(map_os_error)?;
+        Ok(Self::new(Arc::new(gcs), prefix))
+    }
+
+    /// Builds a Microsoft Azure Blob Storage backend for `container`, optionally
+    /// scoped to a key `prefix`.
+    ///
+    /// Connection settings are read from the standard `AZURE_*` environment
+    /// variables (e.g. `AZURE_STORAGE_ACCOUNT_NAME` with
+    /// `AZURE_STORAGE_ACCOUNT_KEY`, a SAS token, or
+    /// `AZURE_STORAGE_USE_EMULATOR` for Azurite).
+    ///
+    /// # Errors
+    /// Returns [`Error::Storage`] if the backend cannot be constructed.
+    pub fn azure(container: &str, prefix: Option<String>) -> Result<Self> {
+        let azure = MicrosoftAzureBuilder::from_env()
+            .with_container_name(container)
+            .build()
+            .map_err(map_os_error)?;
+        Ok(Self::new(Arc::new(azure), prefix))
+    }
+
+    /// Builds a cloud backend for a parsed object-storage URI, rooted at the
+    /// URI's bucket/container with **no** key prefix (callers address objects by
+    /// their full key). Use this for single-object locations.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] for `file://` (not an object store) or a URI
+    /// without a bucket, or [`Error::Storage`] if the backend cannot be built.
+    pub fn for_bucket(uri: &StorageUri) -> Result<Self> {
+        Self::build(uri, None)
+    }
+
+    /// Builds a cloud backend for a parsed object-storage URI, scoped to the
+    /// URI's path as a key `prefix`. Use this for artifact *roots* that hold
+    /// many objects (dump/restore).
+    ///
+    /// # Errors
+    /// See [`ObjectStoreBackend::for_bucket`].
+    pub fn for_prefix(uri: &StorageUri) -> Result<Self> {
+        let prefix = (!uri.path.is_empty()).then(|| uri.path.clone());
+        Self::build(uri, prefix)
+    }
+
+    /// Dispatches URI scheme to the matching backend builder.
+    fn build(uri: &StorageUri, prefix: Option<String>) -> Result<Self> {
+        let bucket = uri
+            .bucket
+            .as_deref()
+            .ok_or_else(|| Error::config("object-storage URI is missing a bucket/container"))?;
+        match uri.scheme {
+            // SeaweedFS is reached through its S3-compatible gateway; point the
+            // AWS_* env (AWS_ENDPOINT, AWS_ALLOW_HTTP) at the gateway.
+            StorageScheme::S3 | StorageScheme::SeaweedS3 => Self::s3(bucket, prefix),
+            StorageScheme::Gcs => Self::gcs(bucket, prefix),
+            StorageScheme::Azure => Self::azure(bucket, prefix),
+            StorageScheme::File => Err(Error::config(
+                "file:// is a local path, not an object store",
+            )),
+        }
     }
 
     /// Resolves a backend-relative path to an `object_store` key, applying the
@@ -212,5 +290,38 @@ fn map_os_error(err: object_store::Error) -> Error {
     match err {
         object_store::Error::AlreadyExists { .. } => Error::already_exists(err.to_string()),
         other => Error::storage(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn for_bucket_and_prefix_reject_file_uri() {
+        let uri = StorageUri::parse("file:///tmp/x").unwrap();
+        assert!(ObjectStoreBackend::for_bucket(&uri).is_err());
+        assert!(ObjectStoreBackend::for_prefix(&uri).is_err());
+    }
+
+    #[test]
+    fn for_prefix_scopes_backend_to_uri_path() {
+        let uri = StorageUri::parse("s3://bucket/backups/db").unwrap();
+        let backend = ObjectStoreBackend::for_prefix(&uri).expect("s3 backend builds");
+        assert_eq!(backend.prefix.as_deref(), Some("backups/db"));
+    }
+
+    #[test]
+    fn for_bucket_has_no_prefix() {
+        let uri = StorageUri::parse("s3://bucket/key.json").unwrap();
+        let backend = ObjectStoreBackend::for_bucket(&uri).expect("s3 backend builds");
+        assert_eq!(backend.prefix, None);
+    }
+
+    #[test]
+    fn seaweed_uses_the_s3_gateway() {
+        // SeaweedFS is reached through the S3-compatible backend.
+        let uri = StorageUri::parse("seaweed+s3://bucket/prefix").unwrap();
+        assert!(ObjectStoreBackend::for_prefix(&uri).is_ok());
     }
 }

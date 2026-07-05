@@ -84,7 +84,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arangodb-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-tools-core",
  "bytes",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-dump"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-storage",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-export"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-import",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-import"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-storage",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-rdf"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-import",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-restore"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-dump",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-storage"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-tools-core",
  "async-compression",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-tools-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arangodb-client",
  "arangodb-dump",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "arangodb-tools-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1246,6 +1246,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
+ "httparse",
  "humantime",
  "hyper",
  "itertools",
@@ -1256,6 +1257,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest",
  "ring",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_urlencoded",

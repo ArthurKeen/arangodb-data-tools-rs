@@ -9,33 +9,61 @@ pub(crate) mod restore;
 
 use std::path::Path;
 
-use arangodb_storage::{Compression, LocalFileSystem, ObjectStore, ObjectStoreBackend, StorageUri};
+use arangodb_storage::{
+    Compression, LocalFileSystem, ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri,
+};
 use arangodb_tools_core::{Error, Result};
 use clap::ValueEnum;
 
 /// Resolves a dump *root* (a directory or object-store prefix that holds many
-/// artifacts) into a store. Accepts a path, a `file://` URI, or
-/// `s3://bucket/prefix`. Used by both `dump` (writes) and `restore` (reads).
+/// artifacts) into a store. Accepts a path, a `file://` URI, or an
+/// object-storage URI (`s3://`, `gs://`, `az://`, `seaweed+s3://`), with the
+/// URI's path used as the key prefix. Used by `dump` (writes) and `restore`
+/// (reads).
 pub(crate) fn open_store_root(location: &str) -> Result<Box<dyn ObjectStore>> {
     if let Some((scheme, _)) = location.split_once("://") {
-        return match scheme {
-            "file" => Ok(Box::new(LocalFileSystem::new(Path::new(
+        if scheme == "file" {
+            return Ok(Box::new(LocalFileSystem::new(Path::new(
                 location.trim_start_matches("file://"),
-            )))),
-            "s3" => {
-                let parsed = StorageUri::parse(location)?;
-                let bucket = parsed.bucket.ok_or_else(|| {
-                    Error::config(format!("s3 URI is missing a bucket: {location}"))
-                })?;
-                let prefix = (!parsed.path.is_empty()).then_some(parsed.path);
-                Ok(Box::new(ObjectStoreBackend::s3(&bucket, prefix)?))
-            }
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; use s3:// or a path"
-            ))),
-        };
+            ))));
+        }
+        let parsed = StorageUri::parse(location)?;
+        return Ok(Box::new(ObjectStoreBackend::for_prefix(&parsed)?));
     }
     Ok(Box::new(LocalFileSystem::new(Path::new(location))))
+}
+
+/// Resolves a single-object location into a store and the object's path within
+/// it. Accepts a filesystem path, a `file://` URI, or an object-storage URI
+/// (`s3://`, `gs://`, `az://`, `seaweed+s3://`). For local paths the store is
+/// rooted at the parent directory and the object path is the file name.
+pub(crate) fn open_object(location: &str) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
+    if let Some((scheme, _)) = location.split_once("://") {
+        if scheme == "file" {
+            return open_local_object(Path::new(location.trim_start_matches("file://")));
+        }
+        let parsed = StorageUri::parse(location)?;
+        let backend = ObjectStoreBackend::for_bucket(&parsed)?;
+        return Ok((Box::new(backend), ObjectPath::new(parsed.path)));
+    }
+    open_local_object(Path::new(location))
+}
+
+/// Roots a [`LocalFileSystem`] at a path's parent directory and returns it with
+/// the file name as the object path.
+fn open_local_object(path: &Path) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::config(format!("path has no file name: {}", path.display())))?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok((
+        Box::new(LocalFileSystem::new(parent)),
+        ObjectPath::new(file_name.to_string()),
+    ))
 }
 
 /// Compression selection shared by `import` and `export`, including `auto`

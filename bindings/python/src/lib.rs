@@ -706,23 +706,16 @@ fn parse_compression(name: Option<&str>, path: &str) -> Result<Compression> {
 }
 
 /// Resolves a single-object output destination into a store and object path.
-/// Accepts a filesystem path, a `file://` URI, or `s3://bucket/key`.
+/// Accepts a filesystem path, a `file://` URI, or an object-storage URI
+/// (`s3://`, `gs://`, `az://`, `seaweed+s3://`).
 fn open_output(output: &str) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
     if let Some((scheme, _)) = output.split_once("://") {
-        return match scheme {
-            "file" => open_local(Path::new(output.trim_start_matches("file://"))),
-            "s3" => {
-                let parsed = StorageUri::parse(output)?;
-                let bucket = parsed
-                    .bucket
-                    .ok_or_else(|| Error::config(format!("s3 URI is missing a bucket: {output}")))?;
-                let backend = ObjectStoreBackend::s3(&bucket, None)?;
-                Ok((Box::new(backend), ObjectPath::new(parsed.path)))
-            }
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; use s3:// or a local path"
-            ))),
-        };
+        if scheme == "file" {
+            return open_local(Path::new(output.trim_start_matches("file://")));
+        }
+        let parsed = StorageUri::parse(output)?;
+        let backend = ObjectStoreBackend::for_bucket(&parsed)?;
+        return Ok((Box::new(backend), ObjectPath::new(parsed.path)));
     }
     open_local(Path::new(output))
 }
@@ -745,25 +738,17 @@ fn open_local(path: &Path) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
 }
 
 /// Resolves a dump *root* (a directory or object-store prefix holding many
-/// artifacts) into a store. Accepts a path, `file://`, or `s3://bucket/prefix`.
+/// artifacts) into a store. Accepts a path, `file://`, or an object-storage URI
+/// (`s3://`, `gs://`, `az://`, `seaweed+s3://`).
 fn open_store_root(location: &str) -> Result<Box<dyn ObjectStore>> {
     if let Some((scheme, _)) = location.split_once("://") {
-        return match scheme {
-            "file" => Ok(Box::new(LocalFileSystem::new(Path::new(
+        if scheme == "file" {
+            return Ok(Box::new(LocalFileSystem::new(Path::new(
                 location.trim_start_matches("file://"),
-            )))),
-            "s3" => {
-                let parsed = StorageUri::parse(location)?;
-                let bucket = parsed.bucket.ok_or_else(|| {
-                    Error::config(format!("s3 URI is missing a bucket: {location}"))
-                })?;
-                let prefix = (!parsed.path.is_empty()).then_some(parsed.path);
-                Ok(Box::new(ObjectStoreBackend::s3(&bucket, prefix)?))
-            }
-            other => Err(Error::config(format!(
-                "object-storage scheme '{other}://' is not supported yet; use s3:// or a path"
-            ))),
-        };
+            ))));
+        }
+        let parsed = StorageUri::parse(location)?;
+        return Ok(Box::new(ObjectStoreBackend::for_prefix(&parsed)?));
     }
     Ok(Box::new(LocalFileSystem::new(Path::new(location))))
 }

@@ -19,7 +19,7 @@ members = [
 exclude = ["bindings/python"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT"
@@ -27,6 +27,8 @@ authors = ["Arthur Keen"]
 repository = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
 homepage = "https://github.com/ArthurKeen/arangodb-data-tools-rs"
 readme = "README.md"
+keywords = ["arangodb", "database", "import", "export"]
+categories = ["database", "command-line-utilities"]
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -40,6 +42,18 @@ all = { level = "warn", priority = -1 }
 # crates with `dep.workspace = true` as they are introduced per the
 # implementation plan.
 [workspace.dependencies]
+# Internal crates. Both `path` (for in-workspace builds) and `version` (so the
+# crates are publishable to crates.io, where the path is dropped) are declared
+# here and inherited by members with `dep.workspace = true`.
+arangodb-tools-core = { version = "0.1.0", path = "crates/arangodb-tools-core" }
+arangodb-client = { version = "0.1.0", path = "crates/arangodb-client" }
+arangodb-storage = { version = "0.1.0", path = "crates/arangodb-storage" }
+arangodb-import = { version = "0.1.0", path = "crates/arangodb-import" }
+arangodb-export = { version = "0.1.0", path = "crates/arangodb-export" }
+arangodb-dump = { version = "0.1.0", path = "crates/arangodb-dump" }
+arangodb-restore = { version = "0.1.0", path = "crates/arangodb-restore" }
+arangodb-rdf = { version = "0.1.0", path = "crates/arangodb-rdf" }
+
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -53,7 +67,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 async-stream = "0.3"
 async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "zstd"] }
 csv-async = { version = "1", default-features = false, features = ["tokio"] }
-object_store = { version = "0.13", features = ["aws"] }
+object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
 regex = "1"
