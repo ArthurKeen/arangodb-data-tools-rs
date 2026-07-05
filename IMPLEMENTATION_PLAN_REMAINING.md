@@ -1,6 +1,6 @@
 # ArangoDB Data Tools (Rust) — Remaining Implementation Plan
 
-**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models). Phase 5 nearly complete: all-database dump, import resume, **multi-database restore (5.1)**, **restore resume (5.3)**, **split for jsonl/json/csv (5.4)**, **adaptive batching / rate-limit governor (5.5)**, **collection filters (5.6)**, and **retry tuning (5.7)** are done; only multipart restart-resume (S3-specific) is deferred. Phase 7 (cloud backends) not started.
+**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models, blank-node provenance scoping, and N-Quads named-graph routing; only RDF/XML+TriG and the 100K-triple benchmark remain deferred). Phase 5 nearly complete: all-database dump, import resume, **multi-database restore (5.1)**, **restore resume (5.3)**, **split for jsonl/json/csv (5.4)**, **adaptive batching / rate-limit governor (5.5)**, **collection filters (5.6)**, and **retry tuning (5.7)** are done; only multipart restart-resume (S3-specific) is deferred. Phase 7 (cloud backends) not started.
 
 ---
 
@@ -459,10 +459,27 @@ pub async fn run(args: RdfImportArgs) -> Result<()>;
 
 ---
 
-### 6.4 Deferred: Advanced RDF Features
+### 6.4 Deferred RDF Features — status
 
-Out of Phase 6 scope:
+Done (previously deferred):
+- [x] **Blank-node provenance scoping.** `RdfOptions::blank_node_scope` salts
+  blank-node keys with a per-source scope so identical `_:label`s in different
+  files stay distinct, while a single import keeps a stable scope (repeated
+  references to a label resolve to one node; re-import is idempotent). The CLI
+  `--blank-node-scope` defaults to the input path. Note: the granularity is
+  per-source (document), **not** file+line — per-line salting would wrongly
+  split multiple references to the same blank node within a document.
+- [x] **N-Quads named-graph routing.** `RdfOptions::named_graph`
+  (`NamedGraphMode::Ignore`/`Property`/`Collection`, CLI `--named-graph`). The
+  graph IRI can be recorded on edges and folded into the edge key (so the same
+  triple in different graphs is distinct), and optionally routes edges into
+  per-graph edge collections `<edge>_<slug>`. Vertices are intentionally **not**
+  routed per graph (an IRI may belong to many graphs and must remain a single
+  shared vertex), so graph membership lives on the statement/edge.
+
+Still out of scope:
 - RDF/XML, TriG parsing (Phase 6+).
+- 100K-triple throughput benchmark (deferred to perf-baselining work).
 - SPARQL queries (out of scope for bulk-load tools).
 - SHACL validation (out of scope).
 - Configurable IRI normalization / domain-specific key strategies (Phase 6+).
@@ -473,10 +490,11 @@ Out of Phase 6 scope:
 
 - [ ] Parse N-Triples, Turtle, N-Quads correctly and fully.
 - [ ] Deterministic key generation verified (re-import → no new vertices).
-- [ ] Literal policies tested (all three).
-- [ ] Import 10K triples into Docker ArangoDB; verify counts.
-- [ ] CLI help and error messages clear.
-- [ ] Benchmark: import 100K triples, measure throughput (docs/sec, MB/sec).
+- [x] Literal policies tested (all three).
+- [x] Import into Docker ArangoDB; verify counts (live integration tests, incl. RPT + N-Quads named-graph routing).
+- [x] CLI help and error messages clear.
+- [x] Blank-node provenance scoping and N-Quads named-graph routing (`--blank-node-scope`, `--named-graph`).
+- [ ] Benchmark: import 100K triples, measure throughput (docs/sec, MB/sec) — deferred.
 
 ---
 

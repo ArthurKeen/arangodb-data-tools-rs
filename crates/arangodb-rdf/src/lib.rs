@@ -16,6 +16,20 @@
 //!   type into `<base>_URIRef`/`_BNode`/`_Literal`, and every statement becomes
 //!   an edge — a faithful, near-lossless mapping.
 //!
+//! # Named graphs (N-Quads)
+//! The named graph of a quad is mapped per [`NamedGraphMode`]: dropped
+//! (default), recorded as a `graph` property on each edge (and folded into the
+//! edge key so the same triple in different graphs stays distinct), or
+//! additionally routed into a per-graph edge collection `<edge>_<slug>`.
+//! Vertices are never routed by graph, so an IRI appearing in several graphs
+//! remains a single, shared vertex.
+//!
+//! # Blank nodes
+//! Blank-node labels are only document-scoped in RDF. Set
+//! [`RdfOptions::blank_node_scope`] (e.g. to the source path) so identical
+//! labels in different sources do not collide; the scope is constant within an
+//! import, so repeated references to a label still resolve to one node.
+//!
 //! Keys are derived deterministically, so re-importing is idempotent.
 //!
 //! # Example
@@ -67,13 +81,23 @@ const EDGE_CHANNEL_CAP: usize = 16_384;
 
 pub use format::RdfFormat;
 pub use model::{
-    edge_document, edge_key, literal_key, literal_vertex, resource_key, resource_vertex,
-    GraphModel, Placement, RdfLiteralPolicy, RdfOptions, RdfResource, RdfTerm, RdfTriple,
+    blank_node_key, edge_document, edge_key, graph_slug, literal_key, literal_vertex, resource_key,
+    resource_vertex, GraphModel, NamedGraphMode, Placement, RdfLiteralPolicy, RdfOptions,
+    RdfResource, RdfTerm, RdfTriple,
 };
 pub use parser::read_rdf_triples;
 
-/// A vertex buffer keyed by collection, then by document key (for dedup).
-type VertexStore = BTreeMap<String, BTreeMap<String, Value>>;
+/// A document buffer keyed by collection, then by document key (for dedup).
+/// Used for vertices and, under [`NamedGraphMode::Collection`], for edges.
+type DocStore = BTreeMap<String, BTreeMap<String, Value>>;
+
+/// An edge document together with the collection it should be loaded into.
+struct BuiltEdge {
+    /// The target edge collection.
+    collection: String,
+    /// The edge document (its `_key` is deterministic).
+    document: Value,
+}
 
 /// Statistics for a completed RDF import.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -159,23 +183,31 @@ where
 
     let sink = progress.as_deref();
 
-    // Edges are streamed to a concurrent loader as they are parsed, so the
-    // whole (typically largest) edge set need not be buffered. Vertices are
-    // still buffered because they are deduplicated and, under
+    // In the common case every edge goes to one collection, so edges are
+    // streamed to a concurrent loader as they are parsed (the whole, typically
+    // largest, edge set need not be buffered). Under per-graph collection
+    // routing the target varies per statement, so edges are instead buffered
+    // and loaded per collection after parsing (like vertices). Vertices are
+    // always buffered because they are deduplicated and, under
     // `VertexProperty`, accumulate literal properties across triples.
-    let (mut edge_tx, edge_rx) = mpsc::channel::<Value>(EDGE_CHANNEL_CAP);
-    let edge_task = {
+    let route_by_collection = options.named_graph == NamedGraphMode::Collection;
+    let (mut edge_tx, edge_task) = if route_by_collection {
+        (None, None)
+    } else {
+        let (tx, rx) = mpsc::channel::<Value>(EDGE_CHANNEL_CAP);
         let client = client.clone();
         let collection = options.edge_collection.clone();
         let batch = batch.clone();
         let concurrency = concurrency.clone();
-        tokio::spawn(async move {
-            let docs = edge_rx.map(Ok::<Value, arangodb_tools_core::Error>);
+        let task = tokio::spawn(async move {
+            let docs = rx.map(Ok::<Value, arangodb_tools_core::Error>);
             import_into_stream(client, &collection, docs, batch, concurrency).await
-        })
+        });
+        (Some(tx), Some(task))
     };
 
-    let mut vertices: VertexStore = BTreeMap::new();
+    let mut vertices: DocStore = BTreeMap::new();
+    let mut edge_buffers: DocStore = BTreeMap::new();
     let mut triples_read: u64 = 0;
     let mut edges_built: u64 = 0;
     let mut last_emit = Instant::now();
@@ -193,11 +225,20 @@ where
         };
         triples_read += 1;
 
-        if let Some(edge) = fold_triple(&triple, options, &mut vertices) {
+        if let Some(BuiltEdge {
+            collection,
+            document,
+        }) = fold_triple(&triple, options, &mut vertices)
+        {
             edges_built += 1;
-            if edge_tx.send(edge).await.is_err() {
-                // The edge loader stopped early (its error surfaces on join).
-                break;
+            match &mut edge_tx {
+                Some(tx) => {
+                    if tx.send(document).await.is_err() {
+                        // The loader stopped early (its error surfaces on join).
+                        break;
+                    }
+                }
+                None => buffer_doc(&mut edge_buffers, collection, document),
             }
         }
 
@@ -215,9 +256,11 @@ where
     }
     drop(edge_tx);
 
-    // If parsing failed, let the edge loader wind down before surfacing it.
+    // If parsing failed, let any edge loader wind down before surfacing it.
     if let Some(err) = parse_error {
-        let _ = edge_task.await;
+        if let Some(task) = edge_task {
+            let _ = task.await;
+        }
         return Err(err);
     }
 
@@ -240,17 +283,42 @@ where
         accumulate(&mut vertex_totals, &summary);
     }
 
-    let edge_summary = edge_task.await.map_err(|err| {
-        arangodb_tools_core::Error::config(format!("RDF edge import task failed: {err}"))
-    })??;
+    // Collect edge results: either from the streaming loader, or by loading the
+    // per-graph edge buffers (ensuring each collection first).
+    let mut edge_totals = arangodb_import::ImportSummary::default();
+    if let Some(task) = edge_task {
+        let summary = task.await.map_err(|err| {
+            arangodb_tools_core::Error::config(format!("RDF edge import task failed: {err}"))
+        })??;
+        accumulate(&mut edge_totals, &summary);
+    } else {
+        for (collection, docs) in edge_buffers {
+            client
+                .ensure_collection(&collection, CollectionKind::Edge)
+                .await?;
+            let docs = stream::iter(
+                docs.into_values()
+                    .map(Ok::<Value, arangodb_tools_core::Error>),
+            );
+            let summary = import_into_stream(
+                client.clone(),
+                &collection,
+                docs,
+                batch.clone(),
+                concurrency.clone(),
+            )
+            .await?;
+            accumulate(&mut edge_totals, &summary);
+        }
+    }
 
     emit_progress(
         sink,
         ProgressSnapshot {
             documents: triples_read,
-            batches: vertex_totals.batches + edge_summary.batches,
-            bytes_written: vertex_totals.bytes_sent + edge_summary.bytes_sent,
-            server_errors: vertex_totals.errors + edge_summary.errors,
+            batches: vertex_totals.batches + edge_totals.batches,
+            bytes_written: vertex_totals.bytes_sent + edge_totals.bytes_sent,
+            server_errors: vertex_totals.errors + edge_totals.errors,
             elapsed_secs: started.elapsed().as_secs_f64(),
             ..ProgressSnapshot::default()
         },
@@ -261,10 +329,25 @@ where
         vertices_built,
         edges_built,
         vertices_created: vertex_totals.created,
-        edges_created: edge_summary.created,
+        edges_created: edge_totals.created,
         vertices_ignored: vertex_totals.ignored,
-        edges_ignored: edge_summary.ignored,
+        edges_ignored: edge_totals.ignored,
     })
+}
+
+/// Inserts an edge document into the per-collection buffer, deduplicating by
+/// its deterministic `_key`.
+fn buffer_doc(store: &mut DocStore, collection: String, document: Value) {
+    let key = document
+        .get("_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    store
+        .entry(collection)
+        .or_default()
+        .entry(key)
+        .or_insert(document);
 }
 
 /// Adds the created/ignored/batches/bytes/errors of `summary` into `totals`.
@@ -292,25 +375,29 @@ fn emit_progress(sink: Option<&dyn ProgressSink>, snapshot: ProgressSnapshot) {
 fn fold_triple(
     triple: &RdfTriple,
     options: &RdfOptions,
-    vertices: &mut VertexStore,
-) -> Option<Value> {
+    vertices: &mut DocStore,
+) -> Option<BuiltEdge> {
     let subject = options.resource_placement(&triple.subject);
     store_vertex(vertices, &subject, || {
-        model::resource_vertex(&triple.subject)
+        options.resource_vertex(&triple.subject)
     });
+
+    // The named-graph provenance to record on the edge (and route it by).
+    let graph = options.edge_graph(triple.graph.as_deref());
+    let collection = options.edge_collection_for(triple.graph.as_deref());
+    let build_edge = |from: &Placement, to: &Placement, predicate: &str| BuiltEdge {
+        collection: collection.clone(),
+        document: model::edge_document(from, to, predicate, graph),
+    };
 
     match &triple.object {
         RdfTerm::Iri(_) | RdfTerm::BlankNode(_) => {
             let object = object_as_resource(&triple.object);
             let object_placement = options.resource_placement(&object);
             store_vertex(vertices, &object_placement, || {
-                model::resource_vertex(&object)
+                options.resource_vertex(&object)
             });
-            Some(model::edge_document(
-                &subject,
-                &object_placement,
-                &triple.predicate,
-            ))
+            Some(build_edge(&subject, &object_placement, &triple.predicate))
         }
         RdfTerm::Literal {
             value,
@@ -338,13 +425,13 @@ fn fold_triple(
             store_vertex(vertices, &literal, || {
                 model::literal_vertex(value, datatype.as_deref(), language.as_deref())
             });
-            Some(model::edge_document(&subject, &literal, &triple.predicate))
+            Some(build_edge(&subject, &literal, &triple.predicate))
         }
     }
 }
 
 /// Inserts a vertex document at its placement if not already present.
-fn store_vertex(vertices: &mut VertexStore, placement: &Placement, make: impl FnOnce() -> Value) {
+fn store_vertex(vertices: &mut DocStore, placement: &Placement, make: impl FnOnce() -> Value) {
     vertices
         .entry(placement.collection.clone())
         .or_default()
@@ -363,7 +450,7 @@ fn object_as_resource(object: &RdfTerm) -> RdfResource {
 }
 
 /// Adds `value` under `properties[predicate]` on the subject vertex document.
-fn add_property(vertices: &mut VertexStore, subject: &Placement, predicate: &str, value: &str) {
+fn add_property(vertices: &mut DocStore, subject: &Placement, predicate: &str, value: &str) {
     let vertex = vertices
         .get_mut(&subject.collection)
         .and_then(|m| m.get_mut(&subject.key))
@@ -400,18 +487,47 @@ where
 mod tests {
     use super::*;
 
-    async fn build_with(input: &str, options: &RdfOptions) -> (VertexStore, Vec<Value>) {
+    async fn build_with(input: &str, options: &RdfOptions) -> (DocStore, Vec<Value>) {
+        build_with_format(input, RdfFormat::NTriples, options).await
+    }
+
+    async fn build_with_format(
+        input: &str,
+        format: RdfFormat,
+        options: &RdfOptions,
+    ) -> (DocStore, Vec<Value>) {
         let reader = std::io::Cursor::new(input.as_bytes().to_vec());
-        let triples = read_rdf_triples(reader, RdfFormat::NTriples);
+        let triples = read_rdf_triples(reader, format);
         futures::pin_mut!(triples);
-        let mut vertices = VertexStore::new();
+        let mut vertices = DocStore::new();
         let mut edges = Vec::new();
         while let Some(triple) = triples.next().await {
             if let Some(edge) = fold_triple(&triple.unwrap(), options, &mut vertices) {
-                edges.push(edge);
+                edges.push(edge.document);
             }
         }
         (vertices, edges)
+    }
+
+    /// Collects built edges grouped by their target collection.
+    async fn build_edges_by_collection(
+        input: &str,
+        options: &RdfOptions,
+    ) -> BTreeMap<String, Vec<Value>> {
+        let reader = std::io::Cursor::new(input.as_bytes().to_vec());
+        let triples = read_rdf_triples(reader, RdfFormat::NQuads);
+        futures::pin_mut!(triples);
+        let mut vertices = DocStore::new();
+        let mut by_collection: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        while let Some(triple) = triples.next().await {
+            if let Some(edge) = fold_triple(&triple.unwrap(), options, &mut vertices) {
+                by_collection
+                    .entry(edge.collection)
+                    .or_default()
+                    .push(edge.document);
+            }
+        }
+        by_collection
     }
 
     /// PGT build that flattens the (single) vertex collection for assertions.
@@ -525,6 +641,89 @@ mod tests {
             build_with("<http://a/s> <http://a/name> \"Alice\" .\n", &options).await;
         assert_eq!(store.get("g_Literal").map(|m| m.len()), Some(1));
         assert_eq!(edges.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn blank_node_scope_changes_keys_and_records_scope() {
+        let input = "_:b1 <http://a/p> <http://a/o> .\n";
+
+        let mut unscoped = RdfOptions::new("nodes", "links");
+        let (v_unscoped, _) = build_with(input, &unscoped).await;
+
+        unscoped.blank_node_scope = Some("source-a.nq".to_string());
+        let (v_scoped, edges_scoped) = build_with(input, &unscoped).await;
+
+        // The blank-node vertex key differs once a scope is applied.
+        let bnode_unscoped = v_unscoped
+            .values()
+            .flat_map(|m| m.values())
+            .find(|v| v["blank_node"] == true)
+            .unwrap();
+        let bnode_scoped = v_scoped
+            .values()
+            .flat_map(|m| m.values())
+            .find(|v| v["blank_node"] == true)
+            .unwrap();
+        assert_ne!(bnode_unscoped["_key"], bnode_scoped["_key"]);
+        assert_eq!(bnode_scoped["scope"], "source-a.nq");
+        // The edge endpoint references the scoped key.
+        assert!(edges_scoped[0]["_from"]
+            .as_str()
+            .unwrap()
+            .ends_with(bnode_scoped["_key"].as_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn named_graph_ignore_drops_the_graph() {
+        let input = "<http://a/s> <http://a/p> <http://a/o> <http://a/g> .\n";
+        let options = RdfOptions::new("nodes", "links"); // Ignore by default
+        let (_, edges) = build_with_format(input, RdfFormat::NQuads, &options).await;
+        assert_eq!(edges.len(), 1);
+        assert!(edges[0].get("graph").is_none(), "graph must be dropped");
+    }
+
+    #[tokio::test]
+    async fn named_graph_property_records_graph_and_disambiguates() {
+        // The same triple in two graphs must become two distinct edges, both in
+        // the base collection, each carrying its graph.
+        let input = concat!(
+            "<http://a/s> <http://a/p> <http://a/o> <http://a/g1> .\n",
+            "<http://a/s> <http://a/p> <http://a/o> <http://a/g2> .\n",
+        );
+        let mut options = RdfOptions::new("nodes", "links");
+        options.named_graph = NamedGraphMode::Property;
+        let by_collection = build_edges_by_collection(input, &options).await;
+
+        assert_eq!(by_collection.len(), 1, "all edges in the base collection");
+        let edges = &by_collection["links"];
+        assert_eq!(edges.len(), 2);
+        assert_ne!(edges[0]["_key"], edges[1]["_key"]);
+        assert_eq!(edges[0]["graph"], "http://a/g1");
+        assert_eq!(edges[1]["graph"], "http://a/g2");
+    }
+
+    #[tokio::test]
+    async fn named_graph_collection_routes_per_graph() {
+        let input = concat!(
+            "<http://a/s> <http://a/p> <http://a/o> <http://a/g1> .\n",
+            "<http://a/s> <http://a/p> <http://a/o2> <http://a/g2> .\n",
+            "<http://a/s> <http://a/p> <http://a/o3> .\n", // default graph
+        );
+        let mut options = RdfOptions::new("nodes", "links");
+        options.named_graph = NamedGraphMode::Collection;
+        let by_collection = build_edges_by_collection(input, &options).await;
+
+        // One collection per named graph, plus the base for the default graph.
+        assert_eq!(by_collection.len(), 3);
+        assert_eq!(by_collection.get("links").map(Vec::len), Some(1));
+        let graph_collections: Vec<&String> = by_collection
+            .keys()
+            .filter(|k| k.starts_with("links_"))
+            .collect();
+        assert_eq!(graph_collections.len(), 2);
+        for edges in by_collection.values() {
+            assert!(edges.iter().all(|e| e.get("_from").is_some()));
+        }
     }
 
     #[test]

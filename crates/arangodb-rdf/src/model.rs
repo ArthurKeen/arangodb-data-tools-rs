@@ -124,6 +124,44 @@ impl GraphModel {
     }
 }
 
+/// How the named graph of an N-Quads statement is mapped into ArangoDB.
+///
+/// Vertices are never routed by graph (an IRI can belong to many graphs and
+/// must remain a single vertex so edges from any graph connect to it); graph
+/// membership is a property of the *statement* (edge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NamedGraphMode {
+    /// Ignore the graph label entirely (default; N-Triples-like behavior).
+    #[default]
+    Ignore,
+    /// Record the graph IRI as a `graph` property on each edge and fold it into
+    /// the edge key, so the same triple asserted in different graphs becomes
+    /// distinct edges in the one edge collection.
+    Property,
+    /// Like [`NamedGraphMode::Property`], but additionally route each edge into
+    /// a per-graph edge collection `<edge_collection>_<slug>` (the default
+    /// graph stays in the base edge collection).
+    Collection,
+}
+
+impl NamedGraphMode {
+    /// Parses a mode name (case-insensitive): `ignore`/`none`, `property`, or
+    /// `collection`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] for an unrecognized name.
+    pub fn parse(name: &str) -> Result<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "ignore" | "none" | "drop" => Ok(Self::Ignore),
+            "property" | "edge-property" => Ok(Self::Property),
+            "collection" | "per-graph" => Ok(Self::Collection),
+            other => Err(Error::config(format!(
+                "unknown named-graph mode '{other}'; expected ignore, property, or collection"
+            ))),
+        }
+    }
+}
+
 /// The collection and key at which a term is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
@@ -145,11 +183,21 @@ pub struct RdfOptions {
     pub graph_model: GraphModel,
     /// How literal-valued objects are handled (PGT only; ignored under RPT).
     pub literal_policy: RdfLiteralPolicy,
+    /// How the N-Quads named graph is mapped into ArangoDB.
+    pub named_graph: NamedGraphMode,
+    /// Provenance scope that disambiguates blank-node labels. Blank-node labels
+    /// are only document-scoped in RDF, so the same `_:b1` in two different
+    /// sources denotes different nodes. When set (e.g. to the source path), the
+    /// scope is mixed into blank-node keys so labels never collide across
+    /// sources; within one import the scope is constant, so repeated references
+    /// to a label still resolve to the same node. `None` preserves the legacy
+    /// label-only keys.
+    pub blank_node_scope: Option<String>,
 }
 
 impl RdfOptions {
-    /// Creates options with the default model (`Pgt`) and policy
-    /// (`NoLiterals`).
+    /// Creates options with the default model (`Pgt`), policy (`NoLiterals`),
+    /// named-graph handling (`Ignore`), and no blank-node scope.
     #[must_use]
     pub fn new(vertex_collection: impl Into<String>, edge_collection: impl Into<String>) -> Self {
         Self {
@@ -157,6 +205,37 @@ impl RdfOptions {
             edge_collection: edge_collection.into(),
             graph_model: GraphModel::default(),
             literal_policy: RdfLiteralPolicy::NoLiterals,
+            named_graph: NamedGraphMode::default(),
+            blank_node_scope: None,
+        }
+    }
+
+    /// The deterministic key for a resource under this configuration (blank
+    /// nodes are salted with [`RdfOptions::blank_node_scope`]).
+    #[must_use]
+    pub fn resource_key(&self, resource: &RdfResource) -> String {
+        match resource {
+            RdfResource::Iri(iri) => hash_key("rdf:iri", &[iri]),
+            RdfResource::BlankNode(label) => {
+                blank_node_key(label, self.blank_node_scope.as_deref())
+            }
+        }
+    }
+
+    /// The vertex document for a resource, using the scoped key and recording
+    /// the blank-node scope when set.
+    #[must_use]
+    pub fn resource_vertex(&self, resource: &RdfResource) -> Value {
+        let key = self.resource_key(resource);
+        match resource {
+            RdfResource::Iri(iri) => json!({ "_key": key, "iri": iri }),
+            RdfResource::BlankNode(label) => {
+                let mut doc = json!({ "_key": key, "blank_node": true, "label": label });
+                if let Some(scope) = &self.blank_node_scope {
+                    doc["scope"] = json!(scope);
+                }
+                doc
+            }
         }
     }
 
@@ -172,7 +251,31 @@ impl RdfOptions {
         };
         Placement {
             collection,
-            key: resource_key(resource),
+            key: self.resource_key(resource),
+        }
+    }
+
+    /// The edge collection a statement in `graph` is routed to.
+    ///
+    /// Only [`NamedGraphMode::Collection`] routes by graph; every other mode
+    /// (and the default graph) uses the base edge collection.
+    #[must_use]
+    pub fn edge_collection_for(&self, graph: Option<&str>) -> String {
+        match (self.named_graph, graph) {
+            (NamedGraphMode::Collection, Some(graph)) => {
+                format!("{}_{}", self.edge_collection, graph_slug(graph))
+            }
+            _ => self.edge_collection.clone(),
+        }
+    }
+
+    /// The graph IRI to attach to edges (and fold into their keys), which is
+    /// `None` unless the graph is actually being tracked.
+    #[must_use]
+    pub fn edge_graph<'a>(&self, graph: Option<&'a str>) -> Option<&'a str> {
+        match self.named_graph {
+            NamedGraphMode::Ignore => None,
+            NamedGraphMode::Property | NamedGraphMode::Collection => graph,
         }
     }
 
@@ -230,13 +333,38 @@ fn hash_key(domain: &str, parts: &[&str]) -> String {
     hex(&hasher.finalize())
 }
 
-/// The deterministic key for a resource vertex.
+/// The deterministic key for a resource vertex (blank nodes are unscoped; use
+/// [`RdfOptions::resource_key`] to salt them with a provenance scope).
 #[must_use]
 pub fn resource_key(resource: &RdfResource) -> String {
     match resource {
         RdfResource::Iri(iri) => hash_key("rdf:iri", &[iri]),
-        RdfResource::BlankNode(label) => hash_key("rdf:bnode", &[label]),
+        RdfResource::BlankNode(label) => blank_node_key(label, None),
     }
+}
+
+/// The deterministic key for a blank node, optionally salted with a provenance
+/// `scope` so identical labels in different sources do not collide.
+#[must_use]
+pub fn blank_node_key(label: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(scope) => hash_key("rdf:bnode", &[scope, label]),
+        None => hash_key("rdf:bnode", &[label]),
+    }
+}
+
+/// A collection-name-safe slug for a named-graph IRI: the IRI with non
+/// -alphanumeric characters replaced by `_`, truncated, and suffixed with a
+/// short hash so distinct IRIs never map to the same slug.
+#[must_use]
+pub fn graph_slug(graph: &str) -> String {
+    let sanitized: String = graph
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(48)
+        .collect();
+    let digest = hash_key("rdf:graph", &[graph]);
+    format!("{sanitized}_{}", &digest[..8])
 }
 
 /// The deterministic key for a materialized-literal vertex.
@@ -250,9 +378,16 @@ pub fn literal_key(value: &str, datatype: Option<&str>, language: Option<&str>) 
 
 /// The deterministic key for a predicate edge, from the fully-qualified
 /// endpoint ids (`collection/key`) so edges stay unique across collections.
+///
+/// When `graph` is `Some`, it is folded into the key so the same triple in
+/// different named graphs yields distinct edges. `None` reproduces the legacy
+/// (triple-only) key, keeping non-quad imports idempotent.
 #[must_use]
-pub fn edge_key(from_id: &str, predicate: &str, to_id: &str) -> String {
-    hash_key("rdf:edge", &[from_id, predicate, to_id])
+pub fn edge_key(from_id: &str, predicate: &str, to_id: &str, graph: Option<&str>) -> String {
+    match graph {
+        Some(graph) => hash_key("rdf:edge", &[from_id, predicate, to_id, graph]),
+        None => hash_key("rdf:edge", &[from_id, predicate, to_id]),
+    }
 }
 
 /// Builds the vertex document for a resource.
@@ -281,17 +416,27 @@ pub fn literal_vertex(value: &str, datatype: Option<&str>, language: Option<&str
 }
 
 /// Builds an edge document connecting two placed vertices, carrying the
-/// predicate IRI. Endpoints may live in different collections (RPT).
+/// predicate IRI and, when `graph` is `Some`, the named-graph IRI. Endpoints
+/// may live in different collections (RPT).
 #[must_use]
-pub fn edge_document(from: &Placement, to: &Placement, predicate: &str) -> Value {
+pub fn edge_document(
+    from: &Placement,
+    to: &Placement,
+    predicate: &str,
+    graph: Option<&str>,
+) -> Value {
     let from_id = format!("{}/{}", from.collection, from.key);
     let to_id = format!("{}/{}", to.collection, to.key);
-    json!({
-        "_key": edge_key(&from_id, predicate, &to_id),
+    let mut doc = json!({
+        "_key": edge_key(&from_id, predicate, &to_id, graph),
         "_from": from_id,
         "_to": to_id,
         "predicate": predicate,
-    })
+    });
+    if let Some(graph) = graph {
+        doc["graph"] = json!(graph);
+    }
+    doc
 }
 
 #[cfg(test)]
@@ -317,10 +462,56 @@ mod tests {
 
     #[test]
     fn edge_key_depends_on_all_three_parts() {
-        let base = edge_key("a", "p", "b");
-        assert_ne!(base, edge_key("a", "p", "c"));
-        assert_ne!(base, edge_key("a", "q", "b"));
-        assert_ne!(base, edge_key("c", "p", "b"));
+        let base = edge_key("a", "p", "b", None);
+        assert_ne!(base, edge_key("a", "p", "c", None));
+        assert_ne!(base, edge_key("a", "q", "b", None));
+        assert_ne!(base, edge_key("c", "p", "b", None));
+    }
+
+    #[test]
+    fn edge_key_graph_disambiguates_and_is_backward_compatible() {
+        let ungraphed = edge_key("a", "p", "b", None);
+        let g1 = edge_key("a", "p", "b", Some("http://g/1"));
+        let g2 = edge_key("a", "p", "b", Some("http://g/2"));
+        // A graph changes the key, and different graphs differ.
+        assert_ne!(ungraphed, g1);
+        assert_ne!(g1, g2);
+        // The unscoped key is unchanged from the legacy 3-part hash.
+        assert_eq!(ungraphed, hash_key("rdf:edge", &["a", "p", "b"]));
+    }
+
+    #[test]
+    fn blank_node_scope_disambiguates_labels() {
+        let unscoped = blank_node_key("b1", None);
+        let file_a = blank_node_key("b1", Some("a.nq"));
+        let file_b = blank_node_key("b1", Some("b.nq"));
+        assert_ne!(file_a, file_b, "same label, different sources must differ");
+        assert_ne!(unscoped, file_a);
+        // Within one scope the label is stable (idempotent re-import).
+        assert_eq!(file_a, blank_node_key("b1", Some("a.nq")));
+    }
+
+    #[test]
+    fn graph_slug_is_safe_and_unique() {
+        let a = graph_slug("http://example.org/g1");
+        let b = graph_slug("http://example.org/g2");
+        assert_ne!(a, b);
+        // Only ASCII alphanumerics and underscores appear.
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    fn edge_collection_routes_only_in_collection_mode() {
+        let mut options = RdfOptions::new("v", "e");
+        assert_eq!(options.edge_collection_for(Some("http://g")), "e");
+        options.named_graph = NamedGraphMode::Property;
+        assert_eq!(options.edge_collection_for(Some("http://g")), "e");
+        options.named_graph = NamedGraphMode::Collection;
+        assert!(options
+            .edge_collection_for(Some("http://g"))
+            .starts_with("e_"));
+        // The default graph always stays in the base collection.
+        assert_eq!(options.edge_collection_for(None), "e");
     }
 
     #[test]

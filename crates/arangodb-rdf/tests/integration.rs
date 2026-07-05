@@ -5,7 +5,7 @@
 //! full path: parse -> build graph model -> load vertex + edge collections.
 
 use arangodb_client::ArangoClient;
-use arangodb_rdf::{import_rdf, GraphModel, RdfFormat, RdfOptions};
+use arangodb_rdf::{graph_slug, import_rdf, GraphModel, NamedGraphMode, RdfFormat, RdfOptions};
 
 /// Builds a client from the CI/integration environment, or `None` when no
 /// server is configured (so the test no-ops in plain `cargo test`).
@@ -178,6 +178,54 @@ async fn rpt_routes_terms_into_typed_collections() {
     assert_eq!(client.collection_count(edge).await.unwrap(), 3);
 
     for c in [&uriref, &bnode, &literal, &edge.to_string()] {
+        let _ = client.drop_collection(c).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nquads_named_graph_routes_edges_per_graph() {
+    let Some(client) = live_client() else {
+        eprintln!("ARANGO_ENDPOINT not set; skipping live RDF N-Quads named-graph test");
+        return;
+    };
+    let vertex = "arangox_it_rdf_nq_nodes";
+    let edge = "arangox_it_rdf_nq_links";
+    let g1 = format!("{edge}_{}", graph_slug("http://ex/g1"));
+    let g2 = format!("{edge}_{}", graph_slug("http://ex/g2"));
+    for c in [vertex, edge, &g1, &g2] {
+        let _ = client.drop_collection(c).await;
+    }
+
+    // The same triple asserted in two graphs, plus one default-graph triple.
+    let nquads = concat!(
+        "<http://ex/alice> <http://ex/knows> <http://ex/bob> <http://ex/g1> .\n",
+        "<http://ex/alice> <http://ex/knows> <http://ex/bob> <http://ex/g2> .\n",
+        "<http://ex/alice> <http://ex/knows> <http://ex/carol> .\n",
+    );
+    let mut options = RdfOptions::new(vertex, edge);
+    options.named_graph = NamedGraphMode::Collection;
+
+    let summary = import_rdf(
+        &client,
+        std::io::Cursor::new(nquads.as_bytes().to_vec()),
+        RdfFormat::NQuads,
+        &options,
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .expect("nquads import succeeds");
+
+    assert_eq!(summary.triples_read, 3);
+    assert_eq!(summary.vertices_created, 3, "alice, bob, carol");
+    assert_eq!(summary.edges_created, 3, "one edge per quad");
+    // Each named graph gets its own edge collection; the default graph stays
+    // in the base collection.
+    assert_eq!(client.collection_count(&g1).await.unwrap(), 1);
+    assert_eq!(client.collection_count(&g2).await.unwrap(), 1);
+    assert_eq!(client.collection_count(edge).await.unwrap(), 1);
+
+    for c in [vertex, edge, &g1, &g2] {
         let _ = client.drop_collection(c).await;
     }
 }

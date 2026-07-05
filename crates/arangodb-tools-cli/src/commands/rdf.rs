@@ -4,7 +4,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use arangodb_import::decompress;
-use arangodb_rdf::{import_rdf_with_progress, GraphModel, RdfFormat, RdfLiteralPolicy, RdfOptions};
+use arangodb_rdf::{
+    import_rdf_with_progress, GraphModel, NamedGraphMode, RdfFormat, RdfLiteralPolicy, RdfOptions,
+};
 use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{default_workers, BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -70,6 +72,19 @@ pub(crate) struct RdfImportArgs {
     /// materializes literals as their own vertices).
     #[arg(long, value_enum, default_value_t = LiteralPolicyArg::NoLiterals)]
     pub literal_policy: LiteralPolicyArg,
+
+    /// How to map the N-Quads named graph: `ignore` (default), `property`
+    /// (record the graph on each edge and disambiguate quads across graphs), or
+    /// `collection` (also route each graph's edges into a per-graph edge
+    /// collection `<edge-collection>_<slug>`).
+    #[arg(long, value_enum, default_value_t = NamedGraphArg::Ignore)]
+    pub named_graph: NamedGraphArg,
+
+    /// Provenance scope for blank-node keys so identical `_:label`s in different
+    /// sources do not collide. Defaults to the input path; pass an empty string
+    /// to disable scoping (legacy label-only keys).
+    #[arg(long, value_name = "SCOPE")]
+    pub blank_node_scope: Option<String>,
 
     /// Input compression. `auto` detects gzip/zstd from the file extension.
     #[arg(long, value_enum, default_value_t = CompressionArg::Auto)]
@@ -141,6 +156,38 @@ impl GraphModelArg {
     }
 }
 
+/// Named-graph handling, mirrored for clap value parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NamedGraphArg {
+    /// Drop the named graph (default).
+    Ignore,
+    /// Record the graph on each edge and disambiguate quads across graphs.
+    Property,
+    /// Route each graph's edges into a per-graph edge collection.
+    Collection,
+}
+
+impl From<NamedGraphArg> for NamedGraphMode {
+    fn from(mode: NamedGraphArg) -> Self {
+        match mode {
+            NamedGraphArg::Ignore => NamedGraphMode::Ignore,
+            NamedGraphArg::Property => NamedGraphMode::Property,
+            NamedGraphArg::Collection => NamedGraphMode::Collection,
+        }
+    }
+}
+
+impl NamedGraphArg {
+    /// The canonical short name (used in JSON output).
+    fn as_str(self) -> &'static str {
+        match self {
+            NamedGraphArg::Ignore => "ignore",
+            NamedGraphArg::Property => "property",
+            NamedGraphArg::Collection => "collection",
+        }
+    }
+}
+
 /// Dispatches an `rdf` subcommand.
 pub(crate) async fn run(args: RdfArgs, reporter: Reporter) -> Result<()> {
     match args.command {
@@ -153,11 +200,14 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
     let format = resolve_format(args.format.as_deref(), &args.input)?;
     let client = args.connection.build_client()?;
 
+    let blank_node_scope = resolve_blank_node_scope(args.blank_node_scope.as_deref(), &args.input);
     let options = RdfOptions {
         vertex_collection: args.vertex_collection.clone(),
         edge_collection: args.edge_collection.clone(),
         graph_model: args.graph_model.into(),
         literal_policy: args.literal_policy.into(),
+        named_graph: args.named_graph.into(),
+        blank_node_scope: blank_node_scope.clone(),
     };
 
     let batch = BatchConfig {
@@ -221,6 +271,8 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
                 "status": "ok",
                 "format": format_name(format),
                 "graph_model": args.graph_model.as_str(),
+                "named_graph": args.named_graph.as_str(),
+                "blank_node_scope": blank_node_scope,
                 "vertex_collection": args.vertex_collection,
                 "edge_collection": args.edge_collection,
                 "triples_read": summary.triples_read,
@@ -235,6 +287,21 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
         },
     );
     Ok(())
+}
+
+/// Resolves the blank-node provenance scope.
+///
+/// An explicit empty string disables scoping; an explicit non-empty value is
+/// used verbatim; otherwise the scope defaults to the input path (so identical
+/// blank-node labels across files stay distinct while a re-import of the same
+/// file stays idempotent). Stdin has no stable path, so it defaults to unscoped.
+fn resolve_blank_node_scope(explicit: Option<&str>, input: &str) -> Option<String> {
+    match explicit {
+        Some("") => None,
+        Some(scope) => Some(scope.to_string()),
+        None if input == "-" => None,
+        None => Some(input.to_string()),
+    }
 }
 
 /// Resolves the RDF format from an explicit `--format` or the input path.
@@ -331,6 +398,29 @@ mod tests {
     #[test]
     fn rejects_unknown_format() {
         assert!(resolve_format(Some("rdfxml"), "x").is_err());
+    }
+
+    #[test]
+    fn blank_node_scope_defaults_to_input_path() {
+        assert_eq!(
+            resolve_blank_node_scope(None, "data/a.nq"),
+            Some("data/a.nq".to_string())
+        );
+        // Explicit empty string disables scoping; stdin has no stable scope.
+        assert_eq!(resolve_blank_node_scope(Some(""), "data/a.nq"), None);
+        assert_eq!(resolve_blank_node_scope(None, "-"), None);
+        assert_eq!(
+            resolve_blank_node_scope(Some("custom"), "data/a.nq"),
+            Some("custom".to_string())
+        );
+    }
+
+    #[test]
+    fn named_graph_maps_to_library_enum() {
+        assert_eq!(
+            NamedGraphMode::from(NamedGraphArg::Collection),
+            NamedGraphMode::Collection
+        );
     }
 
     #[test]

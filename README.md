@@ -126,7 +126,11 @@ arangox rdf import --database mydb --graph-model rpt \
   --vertex-collection rdf --edge-collection rdf_stmt
 ```
 
-The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star, RDFS/OWL inference, `rdf:type`-based collection bucketing, and ArangoDB→RDF export are not (yet) supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered.
+**Named graphs (N-Quads)** are mapped via `--named-graph`: `ignore` (default), `property` (record the graph IRI on each edge and fold it into the edge key, so the same triple in different graphs becomes distinct edges), or `collection` (also route each graph's edges into a per-graph edge collection `<edge-collection>_<slug>`; the default graph stays in the base collection). Vertices are never routed by graph, so an IRI in several graphs remains one shared vertex.
+
+**Blank nodes** are only document-scoped in RDF, so `--blank-node-scope` salts blank-node keys to keep identical `_:label`s in different sources distinct. It defaults to the input path (idempotent re-import of the same file, distinct across files); pass an empty string to disable scoping.
+
+The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star, RDFS/OWL inference, `rdf:type`-based collection bucketing, RDF/XML and TriG, and ArangoDB→RDF export are not (yet) supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered (under `--named-graph collection` edges are buffered per collection instead).
 
 Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
 

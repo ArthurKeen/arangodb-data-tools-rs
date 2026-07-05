@@ -87,7 +87,7 @@ Q2 (In Progress)
 
 ## Phase 6: RDF Import MVP
 
-**Status:** Complete — N-Triples/N-Quads/Turtle parsers, deterministic keys, literal policies, RPT/PGT graph models, streaming edges, and the `arangox rdf import` CLI.  
+**Status:** Complete — N-Triples/N-Quads/Turtle parsers, deterministic keys, literal policies, RPT/PGT graph models, blank-node provenance scoping (`--blank-node-scope`), N-Quads named-graph routing (`--named-graph` ignore/property/collection), streaming edges, and the `arangox rdf import` CLI. Deferred: RDF/XML + TriG parsing and the 100K-triple throughput benchmark.  
 **Duration:** 4–6 weeks  
 **Dependency:** Phase 5.2 (import pipeline) or concurrent  
 **Owned by:** [TBD]  
