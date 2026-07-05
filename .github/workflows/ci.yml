@@ -71,3 +71,33 @@ jobs:
             "mc alias set h http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing h/arangox-test"
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+
+  python-bindings:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The binding is excluded from the Cargo workspace (it needs a Python
+      # interpreter at build time), so it is fmt/clippy/built on its own here.
+      - name: rustfmt
+        run: cargo fmt --manifest-path bindings/python/Cargo.toml --check
+      - name: clippy
+        run: cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build and install the wheel
+        run: pip install .
+        working-directory: bindings/python
+      - name: Smoke-test the module
+        run: |
+          python -c "import arangox; print('arangox', arangox.__version__); \
+          assert all(hasattr(arangox, f) for f in ('import_file', 'export', 'dump', 'restore'))"
