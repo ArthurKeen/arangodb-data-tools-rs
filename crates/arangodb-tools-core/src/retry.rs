@@ -47,6 +47,9 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Upper bound on any single backoff interval.
     pub max_delay: Duration,
+    /// Growth factor applied to the backoff each attempt (e.g. `2.0` doubles).
+    /// Values `<= 1.0` disable growth (every interval is `base_delay`).
+    pub multiplier: f64,
     /// Whether to apply full jitter to the backoff interval.
     pub jitter: bool,
 }
@@ -57,6 +60,7 @@ impl Default for RetryPolicy {
             max_attempts: 5,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(30),
+            multiplier: 2.0,
             jitter: true,
         }
     }
@@ -65,18 +69,35 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Computes the backoff delay before the given 1-based `attempt`.
     ///
-    /// Uses exponential growth (`base * 2^(attempt-1)`) capped at `max_delay`,
-    /// with full jitter applied when [`RetryPolicy::jitter`] is set.
+    /// Uses exponential growth (`base * multiplier^(attempt-1)`) capped at
+    /// `max_delay`, with full jitter applied when [`RetryPolicy::jitter`] is
+    /// set.
     #[must_use]
     pub fn backoff(&self, attempt: u32) -> Duration {
-        let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
-        let capped = self.base_delay.saturating_mul(factor).min(self.max_delay);
+        let capped = self.uncapped_backoff(attempt).min(self.max_delay);
         if self.jitter {
             let nanos = capped.as_nanos().min(u128::from(u64::MAX)) as u64;
             let bound = nanos.max(1);
             Duration::from_nanos(pseudo_random() % bound)
         } else {
             capped
+        }
+    }
+
+    /// The exponentially grown (but not yet jittered) delay, before the
+    /// `max_delay` cap is applied.
+    fn uncapped_backoff(&self, attempt: u32) -> Duration {
+        // A multiplier of exactly 2.0 over integer-nanosecond base delays is
+        // represented exactly by `f64` for all realistic values, so this stays
+        // precise for the common case while supporting arbitrary factors.
+        let exponent = i32::try_from(attempt.saturating_sub(1)).unwrap_or(i32::MAX);
+        let factor = self.multiplier.max(1.0).powi(exponent);
+        let base_nanos = self.base_delay.as_nanos() as f64;
+        let raw = base_nanos * factor;
+        if !raw.is_finite() || raw >= u64::MAX as f64 {
+            self.max_delay
+        } else {
+            Duration::from_nanos(raw as u64)
         }
     }
 }
@@ -87,7 +108,7 @@ impl RetryPolicy {
 /// exhausted or a non-retryable error is encountered.
 pub async fn retry<T, E, F, Fut>(policy: &RetryPolicy, mut op: F) -> Result<T, E>
 where
-    E: Retryable,
+    E: Retryable + std::fmt::Debug,
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
@@ -98,9 +119,24 @@ where
             Ok(value) => return Ok(value),
             Err(err) => {
                 if attempt >= policy.max_attempts || !err.is_retryable() {
+                    if attempt > 1 {
+                        tracing::warn!(
+                            attempts = attempt,
+                            error = ?err,
+                            "giving up after retryable failures"
+                        );
+                    }
                     return Err(err);
                 }
-                tokio::time::sleep(policy.backoff(attempt)).await;
+                let delay = policy.backoff(attempt);
+                tracing::debug!(
+                    attempt,
+                    max_attempts = policy.max_attempts,
+                    delay_ms = delay.as_millis() as u64,
+                    error = ?err,
+                    "retrying after transient error"
+                );
+                tokio::time::sleep(delay).await;
             }
         }
     }
@@ -148,6 +184,7 @@ mod tests {
             max_attempts: 5,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
+            multiplier: 2.0,
             jitter: false,
         }
     }
@@ -200,6 +237,7 @@ mod tests {
             max_attempts: 10,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(1),
+            multiplier: 2.0,
             jitter: false,
         };
         assert_eq!(policy.backoff(1), Duration::from_millis(100));
@@ -209,11 +247,35 @@ mod tests {
     }
 
     #[test]
+    fn multiplier_controls_growth() {
+        let tripling = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_secs(60),
+            multiplier: 3.0,
+            jitter: false,
+        };
+        assert_eq!(tripling.backoff(1), Duration::from_millis(10));
+        assert_eq!(tripling.backoff(2), Duration::from_millis(30));
+        assert_eq!(tripling.backoff(3), Duration::from_millis(90));
+
+        // A multiplier at or below 1.0 keeps every interval at the base delay.
+        let flat = RetryPolicy {
+            multiplier: 1.0,
+            jitter: false,
+            ..tripling
+        };
+        assert_eq!(flat.backoff(1), Duration::from_millis(10));
+        assert_eq!(flat.backoff(5), Duration::from_millis(10));
+    }
+
+    #[test]
     fn jitter_stays_within_bound() {
         let policy = RetryPolicy {
             max_attempts: 10,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(1),
+            multiplier: 2.0,
             jitter: true,
         };
         for _ in 0..1000 {

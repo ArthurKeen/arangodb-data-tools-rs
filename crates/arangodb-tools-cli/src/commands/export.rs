@@ -57,8 +57,9 @@ pub(crate) struct ExportArgs {
     #[arg(long, default_value_t = 10_000)]
     pub batch_size: u32,
 
-    /// Split the export into JSONL parts of at most this many bytes
-    /// (uncompressed) and write a manifest enumerating them. JSONL only.
+    /// Split the export into parts of at most this many bytes (uncompressed)
+    /// and write a manifest enumerating them. Works for jsonl, json, and csv;
+    /// each part is a standalone valid document in the chosen format.
     #[arg(long, value_name = "BYTES")]
     pub split_bytes: Option<u64>,
 }
@@ -86,11 +87,6 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
     let started = Instant::now();
 
     if let Some(max_part_bytes) = args.split_bytes {
-        if format != ExportFormat::JsonLines {
-            return Err(Error::config(
-                "--split-bytes is supported for jsonl output only",
-            ));
-        }
         let meta = ManifestMeta {
             database: args.connection.database.clone(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -102,6 +98,8 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
         let documents = document_stream(client, request);
         let manifest = run_split_export_with_progress(
             documents,
+            format,
+            fields,
             compression,
             store.as_ref(),
             path.as_str(),

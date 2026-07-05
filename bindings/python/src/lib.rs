@@ -91,6 +91,7 @@ fn arangox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     max_docs = None,
     threads = None,
     max_in_flight_bytes = None,
+    adaptive = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn import_file<'py>(
@@ -115,6 +116,7 @@ fn import_file<'py>(
     max_docs: Option<usize>,
     threads: Option<usize>,
     max_in_flight_bytes: Option<usize>,
+    adaptive: Option<bool>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let conn = Conn::new(endpoint, database, username, password, token, insecure, request_timeout_secs);
     let params = ImportParams {
@@ -132,6 +134,7 @@ fn import_file<'py>(
         max_docs,
         threads,
         max_in_flight_bytes,
+        adaptive,
     };
 
     let summary = py
@@ -167,6 +170,7 @@ struct ImportParams {
     max_docs: Option<usize>,
     threads: Option<usize>,
     max_in_flight_bytes: Option<usize>,
+    adaptive: Option<bool>,
 }
 
 /// The async import, equivalent to the CLI's `import` command for local files.
@@ -201,6 +205,7 @@ async fn do_import(params: ImportParams) -> Result<ImportSummary> {
         max_in_flight_bytes: params
             .max_in_flight_bytes
             .unwrap_or(ConcurrencyConfig::default().max_in_flight_bytes),
+        adaptive: params.adaptive.unwrap_or(true),
     };
 
     let compression = Compression::infer_from_path(&params.input);
@@ -334,11 +339,6 @@ async fn do_export(params: ExportParams) -> Result<ExportOutcome> {
     let (store, path) = open_output(&params.output)?;
 
     if let Some(max_part_bytes) = params.split_bytes {
-        if format != ExportFormat::JsonLines {
-            return Err(Error::config(
-                "split_bytes is supported for jsonl output only",
-            ));
-        }
         let meta = ManifestMeta {
             database: params.conn.database.clone(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -348,6 +348,8 @@ async fn do_export(params: ExportParams) -> Result<ExportOutcome> {
         let documents = document_stream(client, request);
         let manifest = run_split_export_with_progress(
             documents,
+            format,
+            fields,
             compression,
             store.as_ref(),
             path.as_str(),

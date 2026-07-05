@@ -65,6 +65,7 @@ async fn export_jsonl_reproduces_collection() {
         ConcurrencyConfig {
             workers: 2,
             max_in_flight_bytes: 1 << 20,
+            adaptive: true,
         },
         sender,
     )

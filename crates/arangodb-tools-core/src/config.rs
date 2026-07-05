@@ -104,6 +104,11 @@ pub struct ConcurrencyConfig {
     pub workers: usize,
     /// Global cap on bytes buffered in flight across all workers.
     pub max_in_flight_bytes: usize,
+    /// Enable the rate-limit-aware concurrency governor, which throttles the
+    /// number of concurrent sends when the server signals back-pressure (429/
+    /// 503 or slow responses) and recovers when it eases. When `false`,
+    /// concurrency stays pinned at `workers`.
+    pub adaptive: bool,
 }
 
 impl Default for ConcurrencyConfig {
@@ -111,6 +116,7 @@ impl Default for ConcurrencyConfig {
         Self {
             workers: default_workers(),
             max_in_flight_bytes: 256 * 1024 * 1024,
+            adaptive: true,
         }
     }
 }

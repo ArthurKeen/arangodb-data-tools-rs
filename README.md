@@ -69,13 +69,21 @@ arangox import --collection users --input users.jsonl \
   --checkpoint users.checkpoint.json
 ```
 
+Imports throttle themselves under server back-pressure: the sender pool watches
+for `429`/`503` responses and slow round trips, halves its concurrency when the
+server strains, and recovers as the pressure eases. Disable it with
+`--no-adaptive`. Retry behavior is tunable per invocation with `--max-retries`
+and `--max-retry-delay-secs` (the cap on any single exponential-backoff wait).
+
 Export a collection or AQL query to JSONL/JSON/CSV (CSV requires `--fields`). Output can be a file, `file://`, or `s3://bucket/key`:
 
 ```bash
 arangox export --collection users --output users.jsonl
 arangox export --query 'FOR u IN users FILTER u.active RETURN u' \
   --output active.jsonl
-# Split large exports into size-bounded JSONL parts plus a manifest
+# Split large exports into size-bounded parts plus a manifest. Works for
+# jsonl, json, and csv; each part is a standalone valid document in the format
+# (JSON-array parts are complete arrays; CSV parts each repeat the header).
 arangox export --collection events --output events.jsonl --split-bytes 134217728
 ```
 

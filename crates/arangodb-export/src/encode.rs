@@ -46,9 +46,7 @@ fn encode_jsonl(documents: DocumentStream) -> ByteStream {
         futures::pin_mut!(documents);
         while let Some(document) = documents.next().await {
             let document = document?;
-            let mut line = serde_json::to_vec(&document)?;
-            line.push(b'\n');
-            yield Bytes::from(line);
+            yield json_line(&document)?;
         }
     })
 }
@@ -76,14 +74,48 @@ fn encode_json_array(documents: DocumentStream) -> ByteStream {
 /// CSV with a header row, one record per document, projecting `fields`.
 fn encode_csv(fields: Vec<String>, documents: DocumentStream) -> ByteStream {
     Box::pin(try_stream! {
-        yield csv_record(fields.iter().map(String::as_str))?;
+        yield csv_header(&fields)?;
         futures::pin_mut!(documents);
         while let Some(document) = documents.next().await {
             let document = document?;
-            let cells: Vec<String> = fields.iter().map(|field| cell(&document, field)).collect();
-            yield csv_record(cells.iter().map(String::as_str))?;
+            yield csv_row(&fields, &document)?;
         }
     })
+}
+
+/// Encodes one document as a JSONL line (`{...}\n`).
+///
+/// # Errors
+/// Returns an error if the document cannot be serialized.
+pub(crate) fn json_line(document: &Value) -> Result<Bytes> {
+    let mut line = serde_json::to_vec(document)?;
+    line.push(b'\n');
+    Ok(Bytes::from(line))
+}
+
+/// Encodes one document as a bare JSON value (a JSON-array element, no framing).
+///
+/// # Errors
+/// Returns an error if the document cannot be serialized.
+pub(crate) fn json_element(document: &Value) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(document)?)
+}
+
+/// Encodes the CSV header row for `fields`.
+///
+/// # Errors
+/// Returns an error if the CSV writer fails.
+pub(crate) fn csv_header(fields: &[String]) -> Result<Bytes> {
+    csv_record(fields.iter().map(String::as_str))
+}
+
+/// Encodes one document as a CSV row projecting `fields`.
+///
+/// # Errors
+/// Returns an error if the CSV writer fails.
+pub(crate) fn csv_row(fields: &[String], document: &Value) -> Result<Bytes> {
+    let cells: Vec<String> = fields.iter().map(|field| cell(document, field)).collect();
+    csv_record(cells.iter().map(String::as_str))
 }
 
 /// Serializes one CSV record (with proper quoting) into a byte chunk.

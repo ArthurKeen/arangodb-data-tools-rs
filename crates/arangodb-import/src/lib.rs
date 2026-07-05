@@ -18,12 +18,14 @@
 //! - [`sender`]: [`run_import`] drives batches through `N` concurrent senders
 //!   under a global in-flight-byte cap.
 
+pub mod adaptive;
 pub mod batch;
 pub mod edge;
 pub mod format;
 pub mod reader;
 pub mod sender;
 
+pub use adaptive::{AdaptiveConfig, AdaptiveLimiter, BatchingMetrics};
 pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
 pub use arangodb_storage::{decompress, Compression};
 pub use arangodb_tools_core::manifest::ImportCheckpoint;

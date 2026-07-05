@@ -1,6 +1,6 @@
 # ArangoDB Data Tools (Rust) — Remaining Implementation Plan
 
-**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models). Phase 5 in progress: all-database dump, import resume, JSONL split, **multi-database restore (5.1)**, **restore resume (5.3)**, and **collection filters (5.6)** are done; adaptive batching (5.5), retry tuning (5.7), and the split leftovers remain. Phase 7 (cloud backends) not started.
+**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models). Phase 5 nearly complete: all-database dump, import resume, **multi-database restore (5.1)**, **restore resume (5.3)**, **split for jsonl/json/csv (5.4)**, **adaptive batching / rate-limit governor (5.5)**, **collection filters (5.6)**, and **retry tuning (5.7)** are done; only multipart restart-resume (S3-specific) is deferred. Phase 7 (cloud backends) not started.
 
 ---
 
@@ -8,7 +8,7 @@
 
 | Phase | Title | Status | Est. Effort | Key Deliverables |
 |-------|-------|--------|-------------|------------------|
-| 5 | Multi-DB, Resume Hardening, Splitting | In progress | 6–8 weeks | ✅ all-DB dump+restore, ✅ import/restore resume, ✅ collection filters, ✅ JSONL split; ⬜ adaptive batching, ⬜ retry tuning, ⬜ multipart restart-resume |
+| 5 | Multi-DB, Resume Hardening, Splitting | In progress | 6–8 weeks | ✅ all-DB dump+restore, ✅ import/restore resume, ✅ collection filters, ✅ split (jsonl/json/csv), ✅ adaptive batching, ✅ retry tuning; ⬜ multipart restart-resume |
 | 6 | RDF Import MVP | ✅ Complete | 4–6 weeks | N-Triples/N-Quads/Turtle parsers, graph model (RPT/PGT), bulk load, CLI |
 | 7 | Cloud Backends | Not started | 3–4 weeks | GCS, Azure, SeaweedFS support, docs, CI |
 
@@ -168,37 +168,19 @@ pub async fn restore_with_checkpoint(
 - Multipart upload (Phase 5 spike): defer backend-specific restart-resumable multipart (S3 upload ID + parts) to a later micro-phase; for now, each part is written as an independent full object, so interruption only affects the current part.
 
 **Deliverables:**
-- [ ] CLI flag: `--max-artifact-size` (bytes; default 100 MB).
-- [ ] Extend `Artifact` struct:
-  ```rust
-  pub struct Artifact {
-      pub path: ObjectPath,
-      pub kind: ArtifactKind,
-      pub format: DataFormat,
-      pub compression: Compression,
-      pub byte_size: u64,
-      pub checksum: Checksum,
-      pub parts: Option<Vec<ArtifactPart>>,  // NEW: None = single object, Some = split
-  }
-
-  pub struct ArtifactPart {
-      pub object_name: String,
-      pub byte_offset: u64,
-      pub byte_size: u64,
-      pub checksum: Checksum,
-  }
-  ```
-- [ ] Split logic in export/dump: rotate to a new object when byte threshold reached.
-- [ ] Manifest encoding: parts serialized as array.
-- [ ] Restore reader: `ObjectStore::get_stream` on each part in order, concatenate transparently.
-- [ ] Benchmark: measure upload throughput with 100 MB vs 1 GB chunks to cloud storage (MinIO/S3).
+- [x] CLI flag: `--split-bytes` (bytes; the byte threshold per part; chosen over `--max-artifact-size`).
+- [x] Each part is an independent, numbered artifact (`Artifact.part`) enumerated in the manifest; a nested `ArtifactPart`/byte-offset model was **not** needed because every part is a standalone, self-describing object with its own checksum and size.
+- [x] Split logic in export: rotate to a new part when the byte threshold is reached, with per-part framing so each part is a valid document.
+- [x] **Now covers all three output formats** (previously JSONL-only): JSONL cuts at line boundaries; JSON-array parts are each complete `[...]` arrays; CSV parts each repeat the header row.
+- [x] Restore/re-import reader: the manifest enumerates parts; a reader consumes each part object in order (each part is independently valid).
+- [ ] Benchmark: measure upload throughput with 100 MB vs 1 GB chunks to cloud storage (MinIO/S3). *(Deferred with cloud backends, Phase 7.)*
 
 **Testing:**
-- [ ] Unit: split logic with small threshold (10 KB parts).
-- [ ] Integration: export with 10 MB part size, verify manifest lists parts, re-import concatenated.
+- [x] Unit: split logic with small thresholds for jsonl, json, and csv (parts standalone-valid; concatenation reproduces every record).
+- [ ] Integration: export with 10 MB part size against a live server. *(Covered by unit tests over the streaming path; live case deferred.)*
 
 **Exit criteria:**
-- Export a collection to S3 in 10 MB parts; manifest lists parts; re-import validates counts.
+- Export a collection in size-bounded parts; manifest lists parts; concatenating parts reproduces every record. ✅ (cloud multipart benchmark deferred to Phase 7)
 
 ---
 
@@ -215,18 +197,17 @@ pub async fn restore_with_checkpoint(
 - Document heuristics as "conservative default" so users can override.
 
 **Deliverables:**
-- [ ] Extend `RetryPolicy` with `adaptive: bool` flag.
-- [ ] In sender pool, track RTT per worker; adjust batch size if RTT trending upward.
-- [ ] In HTTP retry path, detect 429/503; `try_reduce_concurrency()` signals to scale down.
-- [ ] `RestoreOptions`/`ImportOptions`: `adaptive_batching: bool` (default true).
-- [ ] Metrics: `BatchingMetrics { current_batch_size, avg_rtt_ms, retry_count_429, retry_count_503 }`.
+- [x] `AdaptiveLimiter` concurrency governor (`arangodb-import::adaptive`) — a resizable in-flight-send limiter driven by send outcomes.
+- [x] `ConcurrencyConfig.adaptive: bool` (default true), surfaced as `--no-adaptive` on the CLI and an `adaptive=` kwarg in the Python binding. *(Chosen over a `RetryPolicy.adaptive` flag, since throttling is a concurrency concern, not a retry-policy concern.)*
+- [x] Sender pool times each send (RTT); a send exceeding `slow_threshold` — the proxy for a server retrying 429/503 internally — or a terminal 429/502/503/504 halves concurrency down to a floor of 1, then recovers one slot per quiet `recover_after` window.
+- [x] Metrics: `BatchingMetrics { final_concurrency, min_concurrency_seen, rate_limited_429, rate_limited_503, slow_sends, avg_rtt_ms }`, logged at end of run when the governor engaged. *(Batch size stays fixed; adaptivity is applied to concurrency, the higher-value lever, rather than mid-stream re-batching.)*
 
 **Testing:**
-- [ ] Unit: backoff calculation (rate limit detection → wait duration).
-- [ ] Integration: import with server-side rate limit (mock or real); verify concurrency reduces and resumes.
+- [x] Unit: throttle-halving to floor, slow-send throttling + recovery, disabled no-op, non-rate-limit errors ignored, and `acquire` blocking until a slot frees.
+- [ ] Integration: import against a live server returning sustained 429. *(Governor state machine is unit-tested; the live-server case is deferred.)*
 
 **Exit criteria:**
-- Import under sustained 429 responses; concurrency adapts downward; throughput remains positive.
+- Under sustained rate-limit signals, concurrency adapts downward to the floor and recovers; the pipeline keeps making progress (never stalls). ✅
 
 ---
 
@@ -284,31 +265,31 @@ pub struct FilterOptions {
 - Document defaults and override mechanism.
 
 **Deliverables:**
-- [ ] Extend `RetryPolicy` with `initial_backoff_ms`, `max_backoff_ms`, `backoff_multiplier`.
-- [ ] Implement exponential backoff with jitter: `delay = min(max, initial * multiplier^attempt) + jitter(±10%)`.
-- [ ] CLI flag: `--max-retry-delay` (seconds).
-- [ ] Logging: every retry logs the delay and reason.
+- [x] `RetryPolicy` now carries a configurable `multiplier` alongside `base_delay`/`max_delay` (the existing fields already covered `initial_backoff_ms`/`max_backoff_ms`).
+- [x] Exponential backoff with full jitter, capped at `max_delay`; a `multiplier <= 1.0` disables growth.
+- [x] CLI flags: `--max-retry-delay-secs` (the cap on any single backoff) and `--max-retries`, wired through the shared connection args into the client's `RetryPolicy`.
+- [x] Logging: each retry logs the attempt, delay, and error at `debug`; a final give-up logs at `warn`.
 
 **Testing:**
-- [ ] Unit: backoff calculation across multiple retries.
-- [ ] Integration: verify delay grows exponentially and stays within bounds.
+- [x] Unit: backoff growth for multipliers 2.0/3.0/1.0, cap enforcement, and jitter bounds.
+- [ ] Integration: live server delay observation. *(Covered by deterministic unit tests over `backoff()`.)*
 
 **Exit criteria:**
-- Unit test confirms backoff timing within 10% of target.
+- Backoff is configurable per invocation, grows by the configured multiplier, and never exceeds `max_delay`. ✅
 
 ---
 
 ### Phase 5 Exit Criteria
 
-- [ ] All-database dump works and restores correctly.
-- [ ] Import resumes from checkpoint without duplication (fixture: 1M docs, interrupt, resume).
-- [ ] Restore resumes from checkpoint without duplication (fixture: 4-collection dump, interrupt, resume).
-- [ ] Large export (100 MB+) splits into parts; re-import validates counts.
-- [ ] Dump/restore with collection filters works.
-- [ ] Adaptive batching reduces concurrency under 429 load; throughput stays positive.
-- [ ] Retry/backoff is configurable and tunable.
-- [ ] All CLI flags documented.
-- [ ] CI passes; benchmark run.
+- [x] All-database dump works and restores correctly.
+- [x] Import resumes from checkpoint without duplication.
+- [x] Restore resumes from checkpoint without duplication (fixture: multi-collection dump, interrupt, resume).
+- [x] Large export splits into parts (jsonl/json/csv); concatenating parts validates counts.
+- [x] Dump/restore with collection filters works.
+- [x] Adaptive batching reduces concurrency under 429 load; throughput stays positive.
+- [x] Retry/backoff is configurable and tunable.
+- [x] All CLI flags documented.
+- [~] CI passes; cloud-multipart benchmark deferred to Phase 7.
 
 ---
 

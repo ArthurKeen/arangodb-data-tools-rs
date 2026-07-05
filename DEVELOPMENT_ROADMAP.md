@@ -32,7 +32,7 @@ Q2 (In Progress)
 
 ## Phase 5: Multi-Database, Resume Hardening, Splitting
 
-**Status:** In progress — done: all-database dump + restore (5.1), import resume (5.2), restore resume (5.3), JSONL split (5.4), collection filters (5.6). Remaining: adaptive batching (5.5), retry tuning (5.7), split leftovers (JSON/CSV, multipart restart-resume).  
+**Status:** In progress — done: all-database dump + restore (5.1), import resume (5.2), restore resume (5.3), split for jsonl/json/csv (5.4), adaptive batching / rate-limit governor (5.5), collection filters (5.6), retry tuning (5.7). Remaining: multipart restart-resume (deferred, S3-specific).  
 **Duration:** 6–8 weeks  
 **Dependency:** Phase 4 complete (dump/restore working)  
 **Owned by:** [TBD]  
@@ -200,7 +200,7 @@ Q2 (In Progress)
 [x] Phase 5.1: All-Databases Dump + multi-database restore
 [x] Phase 5.2: Import Resume
 [x] Phase 5.3: Restore Resume
-[~] Phase 5: Completion (split done for JSONL, filters done; batching + retry tuning remain)
+[~] Phase 5: Completion (split jsonl/json/csv, filters, adaptive batching, retry tuning done; only multipart restart-resume deferred)
 ```
 
 ### High Value (Can Start After Phase 5)

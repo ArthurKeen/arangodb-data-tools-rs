@@ -73,6 +73,7 @@ async fn imports_one_million_jsonl_documents() {
     let concurrency = ConcurrencyConfig {
         workers: 4,
         max_in_flight_bytes: 128 * 1024 * 1024,
+        adaptive: true,
     };
 
     let summary = run_import(documents, batch, concurrency, sender)
@@ -131,6 +132,7 @@ async fn imports_edges_with_preflight() {
         ConcurrencyConfig {
             workers: 2,
             max_in_flight_bytes: 1 << 20,
+            adaptive: true,
         },
         sender,
     )
@@ -215,6 +217,7 @@ async fn peak_in_flight_is_bounded_independent_of_input_size() {
         let concurrency = ConcurrencyConfig {
             workers: 8,
             max_in_flight_bytes: cap,
+            adaptive: false,
         };
         run_import(
             documents,

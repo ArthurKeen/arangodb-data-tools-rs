@@ -167,6 +167,7 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
     let concurrency = ConcurrencyConfig {
         workers: args.threads.unwrap_or_else(default_workers),
         max_in_flight_bytes: args.max_in_flight_bytes,
+        adaptive: true,
     };
 
     let compression = args.compression.resolve(&args.input);

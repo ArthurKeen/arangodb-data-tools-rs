@@ -24,6 +24,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::adaptive::{AdaptiveConfig, AdaptiveLimiter};
 use crate::batch::{into_batches, Batch};
 
 /// How often a periodic [`ProgressEvent::Progress`] is emitted when a progress
@@ -362,19 +363,37 @@ where
     let (tx, rx) = mpsc::channel::<(Batch, OwnedSemaphorePermit)>(concurrency.workers * 2);
     let rx = Arc::new(Mutex::new(rx));
 
+    // The rate-limit-aware concurrency governor. It starts at the worker count
+    // (a no-op) and only clamps down when the server signals back-pressure.
+    let limiter = AdaptiveLimiter::new(AdaptiveConfig::new(
+        concurrency.adaptive,
+        concurrency.workers,
+    ));
+
     let mut workers = JoinSet::new();
     for _ in 0..concurrency.workers {
         let rx = Arc::clone(&rx);
         let sender = Arc::clone(&sender);
         let done = done_tx.clone();
         let counters = counters.clone();
+        let limiter = Arc::clone(&limiter);
         workers.spawn(async move {
             let mut summary = ImportSummary::default();
             loop {
                 // The lock guards only the `recv` await; senders run unlocked.
                 let next = rx.lock().await.recv().await;
                 let Some((batch, permit)) = next else { break };
-                let result = sender.send(&batch).await?;
+                // Gate the send on the adaptive limiter, then time it so the
+                // governor can react to latency and rate-limit outcomes.
+                limiter.acquire().await;
+                let started = Instant::now();
+                let result = sender.send(&batch).await;
+                let rtt = started.elapsed();
+                match &result {
+                    Ok(_) => limiter.record_success(rtt).await,
+                    Err(err) => limiter.record_error(rate_limit_status(err)).await,
+                }
+                let result = result?;
                 summary.record(&batch, &result);
                 if let Some(counters) = &counters {
                     counters.add_documents(batch.documents as u64);
@@ -442,6 +461,26 @@ where
         ticker.abort();
     }
 
+    // Surface what the adaptive governor observed, but only when it actually
+    // engaged (throttled or saw rate limits) so healthy imports stay quiet.
+    if concurrency.adaptive {
+        let metrics = limiter.metrics().await;
+        if metrics.min_concurrency_seen < concurrency.workers
+            || metrics.rate_limited_429 > 0
+            || metrics.rate_limited_503 > 0
+        {
+            tracing::info!(
+                final_concurrency = metrics.final_concurrency,
+                min_concurrency = metrics.min_concurrency_seen,
+                rate_limited_429 = metrics.rate_limited_429,
+                rate_limited_503 = metrics.rate_limited_503,
+                slow_sends = metrics.slow_sends,
+                avg_rtt_ms = metrics.avg_rtt_ms,
+                "adaptive concurrency governor throttled under server back-pressure"
+            );
+        }
+    }
+
     // Workers have all exited, so the checkpoint channel is closed; wait for the
     // final checkpoint write to land before returning.
     if let Some(handle) = checkpoint_handle {
@@ -460,6 +499,15 @@ where
 /// type's range.
 fn permits_for(bytes: usize, cap: usize) -> u32 {
     u32::try_from(bytes.min(cap)).unwrap_or(u32::MAX)
+}
+
+/// Extracts the HTTP status from a send error when it is a rate-limit (429) or
+/// availability (502/503/504) status the governor should react to.
+fn rate_limit_status(err: &Error) -> Option<u16> {
+    match err {
+        Error::Http { status, .. } if matches!(status, 429 | 502 | 503 | 504) => Some(*status),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +559,9 @@ mod tests {
         ConcurrencyConfig {
             workers,
             max_in_flight_bytes,
+            // Keep the byte-cap concurrency tests deterministic; adaptive
+            // throttling is exercised separately in `adaptive.rs`.
+            adaptive: false,
         }
     }
 
@@ -560,6 +611,28 @@ mod tests {
             sender.max_in_flight_bytes.load(Ordering::SeqCst) <= cap as i64,
             "in-flight bytes exceeded the cap"
         );
+    }
+
+    #[tokio::test]
+    async fn imports_all_documents_with_adaptive_governor_enabled() {
+        // With the governor enabled but sends fast, concurrency stays at the
+        // worker count and every document is imported (wiring smoke test).
+        let sender = Arc::new(FakeSender::default());
+        let summary = run_import(
+            doc_stream(64),
+            batches(1 << 20, 4),
+            ConcurrencyConfig {
+                workers: 4,
+                max_in_flight_bytes: 1 << 20,
+                adaptive: true,
+            },
+            Arc::clone(&sender) as Arc<dyn BatchSender>,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.documents_sent, 64);
+        assert_eq!(summary.batches, 16); // ceil(64 / 4)
     }
 
     #[tokio::test]

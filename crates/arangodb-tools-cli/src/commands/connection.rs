@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use arangodb_client::{ArangoClient, ArangoClientBuilder};
-use arangodb_tools_core::{Error, Result};
+use arangodb_tools_core::{Error, Result, RetryPolicy};
 use clap::Args;
 
 /// Connection and authentication options common to all subcommands.
@@ -42,6 +42,14 @@ pub(crate) struct ConnectionArgs {
     /// Per-request timeout, in seconds.
     #[arg(long, default_value_t = 120)]
     pub request_timeout_secs: u64,
+
+    /// Maximum attempts (including the first) for each retryable request.
+    #[arg(long, default_value_t = 5)]
+    pub max_retries: u32,
+
+    /// Upper bound, in seconds, on any single retry backoff interval.
+    #[arg(long, default_value_t = 30)]
+    pub max_retry_delay_secs: u64,
 }
 
 impl ConnectionArgs {
@@ -56,7 +64,12 @@ impl ConnectionArgs {
             .endpoint(&self.endpoint)
             .database(&self.database)
             .insecure(self.insecure)
-            .request_timeout(Duration::from_secs(self.request_timeout_secs));
+            .request_timeout(Duration::from_secs(self.request_timeout_secs))
+            .retry_policy(RetryPolicy {
+                max_attempts: self.max_retries.max(1),
+                max_delay: Duration::from_secs(self.max_retry_delay_secs.max(1)),
+                ..RetryPolicy::default()
+            });
 
         if let Some(var) = &self.auth_token_env {
             builder = builder.bearer_auth(read_env(var)?);

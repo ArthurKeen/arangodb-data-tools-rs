@@ -88,6 +88,12 @@ pub(crate) struct ImportArgs {
     #[arg(long, default_value_t = ConcurrencyConfig::default().max_in_flight_bytes)]
     pub max_in_flight_bytes: usize,
 
+    /// Disable the rate-limit-aware concurrency governor. By default the sender
+    /// throttles down when the server returns 429/503 or slow responses and
+    /// recovers when the pressure eases.
+    #[arg(long)]
+    pub no_adaptive: bool,
+
     /// Enable resumable import: read and update a rolling checkpoint at this
     /// location (a local path or `s3://bucket/key`). Re-running with the same
     /// checkpoint skips batches already committed by the previous run.
@@ -149,6 +155,7 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
             .threads
             .unwrap_or_else(arangodb_tools_core::config::default_workers),
         max_in_flight_bytes: args.max_in_flight_bytes,
+        adaptive: !args.no_adaptive,
     };
 
     let compression = args.compression.resolve(&args.input);
