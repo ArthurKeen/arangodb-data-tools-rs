@@ -2,15 +2,16 @@
 //!
 //! Each line is `subject predicate object [graph] .`. Parsing is streaming and
 //! memory-bounded by a single line; blank lines and `#` comments are skipped.
-//! Turtle is recognized by [`RdfFormat`] but not parsed here (it needs a full
-//! grammar with prefix handling); callers get a clear error.
+//! Turtle needs a full grammar with prefix/base state, so [`read_rdf_triples`]
+//! buffers the input and delegates it to [`crate::turtle`].
 
 use arangodb_tools_core::{Error, Result};
 use futures::Stream;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
 use crate::format::RdfFormat;
 use crate::model::{RdfResource, RdfTerm, RdfTriple};
+use crate::turtle::parse_turtle;
 
 /// Parses `reader` as RDF in `format`, yielding one [`RdfTriple`] per
 /// statement. Errors carry the 1-based line number.
@@ -24,32 +25,41 @@ where
     R: AsyncRead + Unpin + Send + 'static,
 {
     async_stream::try_stream! {
-        ensure_line_based(format)?;
-
-        let mut lines = BufReader::new(reader).lines();
-        let mut line_no: u64 = 0;
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|err| Error::config(format!("error reading RDF input: {err}")))?
-        {
-            line_no += 1;
-            let statement = parse_statement(&line, format)
-                .map_err(|err| Error::config(format!("RDF parse error on line {line_no}: {err}")))?;
-            if let Some(triple) = statement {
-                yield triple;
+        match format {
+            RdfFormat::NTriples | RdfFormat::NQuads => {
+                let mut lines = BufReader::new(reader).lines();
+                let mut line_no: u64 = 0;
+                while let Some(line) = lines
+                    .next_line()
+                    .await
+                    .map_err(|err| Error::config(format!("error reading RDF input: {err}")))?
+                {
+                    line_no += 1;
+                    let statement = parse_statement(&line, format).map_err(|err| {
+                        Error::config(format!("RDF parse error on line {line_no}: {err}"))
+                    })?;
+                    if let Some(triple) = statement {
+                        yield triple;
+                    }
+                }
+            }
+            RdfFormat::Turtle => {
+                // Turtle carries prefix/base state and nests structures, so it
+                // is parsed as a whole document (the input is buffered) and the
+                // resulting triples are streamed out.
+                let mut reader = reader;
+                let mut buf = Vec::new();
+                reader
+                    .read_to_end(&mut buf)
+                    .await
+                    .map_err(|err| Error::config(format!("error reading RDF input: {err}")))?;
+                let text = String::from_utf8(buf)
+                    .map_err(|_| Error::config("Turtle input is not valid UTF-8"))?;
+                for triple in parse_turtle(&text)? {
+                    yield triple;
+                }
             }
         }
-    }
-}
-
-/// Rejects formats this parser does not handle.
-fn ensure_line_based(format: RdfFormat) -> Result<()> {
-    match format {
-        RdfFormat::NTriples | RdfFormat::NQuads => Ok(()),
-        RdfFormat::Turtle => Err(Error::config(
-            "Turtle parsing is not implemented yet; use ntriples or nquads",
-        )),
     }
 }
 
@@ -389,9 +399,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turtle_is_rejected() {
-        assert!(parse_all("@prefix x: <y> .", RdfFormat::Turtle)
-            .await
-            .is_err());
+    async fn turtle_is_parsed_through_the_stream() {
+        let input = concat!(
+            "@prefix ex: <http://example.org/> .\n",
+            "ex:s ex:p ex:o , ex:o2 .\n",
+        );
+        let triples = parse_all(input, RdfFormat::Turtle).await.unwrap();
+        assert_eq!(triples.len(), 2);
+        assert_eq!(
+            triples[0].subject,
+            RdfResource::Iri("http://example.org/s".to_string())
+        );
     }
 }

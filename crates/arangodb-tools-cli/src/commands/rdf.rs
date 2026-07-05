@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use arangodb_import::decompress;
-use arangodb_rdf::{import_rdf, RdfFormat, RdfLiteralPolicy, RdfOptions};
+use arangodb_rdf::{import_rdf_with_progress, RdfFormat, RdfLiteralPolicy, RdfOptions};
 use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{default_workers, BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -43,8 +43,8 @@ pub(crate) struct RdfImportArgs {
     #[arg(long)]
     pub input: String,
 
-    /// RDF format: `ntriples` (`nt`), `nquads` (`nq`), or `turtle` (`ttl`,
-    /// not yet implemented). Inferred from the file extension when omitted.
+    /// RDF format: `ntriples` (`nt`), `nquads` (`nq`), or `turtle` (`ttl`).
+    /// Inferred from the file extension when omitted.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
 
@@ -137,7 +137,16 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
 
     reporter.started("rdf-import");
     let started = Instant::now();
-    let summary = import_rdf(&client, reader, format, &options, batch, concurrency).await?;
+    let summary = import_rdf_with_progress(
+        &client,
+        reader,
+        format,
+        &options,
+        batch,
+        concurrency,
+        reporter.progress_sink(),
+    )
+    .await?;
     let elapsed_secs = started.elapsed().as_secs_f64();
 
     reporter.finished(ProgressSnapshot {

@@ -24,4 +24,5 @@ async-stream = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
+arangodb-client = { path = "../arangodb-client" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

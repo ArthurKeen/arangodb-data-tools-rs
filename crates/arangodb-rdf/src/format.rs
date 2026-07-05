@@ -9,8 +9,9 @@ pub enum RdfFormat {
     NTriples,
     /// N-Quads: N-Triples with an optional fourth graph term per line.
     NQuads,
-    /// Turtle (W3C). Not implemented yet; recognized so callers get a clear
-    /// error rather than a misparse.
+    /// Turtle (W3C): a practical subset (prefixes/base, `a`, predicate and
+    /// object lists, blank-node property lists, collections, and typed,
+    /// numeric, and boolean literals).
     Turtle,
 }
 
