@@ -1,8 +1,7 @@
 //! `arangox` command-line entry point.
 //!
 //! Subcommands map CLI options to the library job crates: `import`, `export`,
-//! `dump`, and `restore` are wired. RDF bulk import lands in a later phase. See
-//! `docs/IMPLEMENTATION_PLAN.md`.
+//! `dump`, `restore`, and `rdf` are wired. See `docs/IMPLEMENTATION_PLAN.md`.
 
 mod commands;
 mod output;
@@ -34,6 +33,8 @@ enum Command {
     Dump(commands::dump::DumpArgs),
     /// Restore a database from a dump.
     Restore(commands::restore::RestoreArgs),
+    /// Bulk-import RDF (N-Triples/N-Quads) into a property graph.
+    Rdf(commands::rdf::RdfArgs),
 }
 
 #[tokio::main]
@@ -45,6 +46,7 @@ async fn main() -> std::process::ExitCode {
         Command::Export(args) => commands::export::run(args, reporter).await,
         Command::Dump(args) => commands::dump::run(args, reporter).await,
         Command::Restore(args) => commands::restore::run(args, reporter).await,
+        Command::Rdf(args) => commands::rdf::run(args, reporter).await,
     };
 
     match result {

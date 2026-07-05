@@ -142,8 +142,14 @@ dependencies = [
 name = "arangodb-rdf"
 version = "0.0.0"
 dependencies = [
+ "arangodb-client",
  "arangodb-import",
  "arangodb-tools-core",
+ "async-stream",
+ "futures",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 # arangodb-data-tools-rs
 
-A Rust library and CLI toolkit for ArangoDB bulk data workflows: **import**, **export**, **dump**, and **restore**, with first-class support for pluggable storage backends (local files and object storage such as S3, GCS, Azure, and SeaweedFS) and planned RDF bulk-loading.
+A Rust library and CLI toolkit for ArangoDB bulk data workflows: **import**, **export**, **dump**, and **restore**, with first-class support for pluggable storage backends (local files and object storage such as S3, GCS, Azure, and SeaweedFS) and RDF bulk-loading (N-Triples/N-Quads).
 
 > **Status: pre-alpha / under active development.**
 > This project is a clean-room reimplementation modeled on the behavior of ArangoDB's client tools (`arangoimport`, `arangoexport`, `arangodump`, `arangorestore`). It does **not** embed or link ArangoDB's C++ client code. Interoperability with the official tools is a scoped, best-effort goal and is not yet guaranteed. APIs, formats, and CLI options will change without notice until the first tagged release.
@@ -31,8 +31,8 @@ This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATI
 | `arangodb-export` | Export via AQL cursors (JSONL/JSON/CSV), with optional size-split JSONL + manifest | Implemented |
 | `arangodb-dump` | Database dump (manifest-driven) | Implemented |
 | `arangodb-restore` | Database restore from a dump | Implemented |
-| `arangodb-rdf` | RDF bulk import (N-Triples, Turtle, ...) | Planned (stub) |
-| `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore` subcommands | Implemented (no `rdf` subcommand yet) |
+| `arangodb-rdf` | RDF bulk import into a property graph (N-Triples, N-Quads; Turtle planned) | Implemented (N-Triples/N-Quads) |
+| `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore`, `rdf` subcommands | Implemented |
 
 > Storage backends: local filesystem and S3-compatible object stores (AWS S3, MinIO/LocalStack, SeaweedFS via its S3 gateway) are wired today through `AWS_*` environment configuration. GCS (`gs://`) and Azure (`az://`) are planned and currently rejected with a clear error.
 
@@ -49,7 +49,7 @@ cargo fmt --all --check
 
 ## Usage
 
-The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, and `restore` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--username`, `--password-env`/`--auth-token-env` (names of env vars holding the secret; secrets are never passed on the command line), `--tls-ca`, and `--insecure`.
+The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, `restore`, and `rdf` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--username`, `--password-env`/`--auth-token-env` (names of env vars holding the secret; secrets are never passed on the command line), `--tls-ca`, and `--insecure`.
 
 ```bash
 # Build, then run via cargo (or use the compiled ./target/release/arangox)
@@ -85,6 +85,16 @@ Dump a database and restore it (the manifest is the source of truth):
 arangox dump --database mydb --output ./dump-mydb
 arangox restore --database mydb-copy --input ./dump-mydb --create-database
 ```
+
+Bulk-load RDF (N-Triples/N-Quads) into a property graph. Each IRI/blank node becomes a vertex, and each triple becomes an edge carrying the predicate IRI; keys are deterministic (hashed) so re-importing the same data is idempotent. The vertex and edge collections are created if missing:
+
+```bash
+arangox rdf import --database mydb \
+  --input graph.nt \
+  --vertex-collection rdf_nodes --edge-collection rdf_links
+```
+
+Literal-valued objects are dropped by default (`--literal-policy no-literals`); use `--literal-policy vertex-property` to attach them to the subject vertex, or `--literal-policy materialize` to give each literal its own vertex plus an edge. Turtle (`.ttl`) is recognized but not yet parsed and returns a clear error.
 
 Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
 
