@@ -97,7 +97,7 @@ async fn dump_restore_round_trip_preserves_count_and_index() {
         &store,
         &RestoreOptions {
             overwrite: true,
-            create_database: None,
+            ..RestoreOptions::default()
         },
     )
     .await

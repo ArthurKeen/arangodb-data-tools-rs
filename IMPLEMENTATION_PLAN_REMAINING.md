@@ -1,6 +1,6 @@
 # ArangoDB Data Tools (Rust) — Remaining Implementation Plan
 
-**Current Status:** Phase 0–4 complete (foundations, import, storage, export, dump/restore MVPs). This document tracks the remaining work: Phase 5 (resume hardening), Phase 6 (RDF), and Phase 7 (cloud backends).
+**Current Status:** Phase 0–4 complete. Phase 6 (RDF) complete (incl. RPT/PGT graph models). Phase 5 in progress: all-database dump, import resume, JSONL split, **multi-database restore (5.1)**, **restore resume (5.3)**, and **collection filters (5.6)** are done; adaptive batching (5.5), retry tuning (5.7), and the split leftovers remain. Phase 7 (cloud backends) not started.
 
 ---
 
@@ -8,11 +8,11 @@
 
 | Phase | Title | Status | Est. Effort | Key Deliverables |
 |-------|-------|--------|-------------|------------------|
-| 5 | Multi-DB, Resume Hardening, Splitting | Not started | 6–8 weeks | All-DB dump, resumable imports/restores, multipart restart-resume, adaptive batching, collection filters |
-| 6 | RDF Import MVP | Not started | 4–6 weeks | N-Triples/Turtle parsers, graph model, bulk load, CLI |
+| 5 | Multi-DB, Resume Hardening, Splitting | In progress | 6–8 weeks | ✅ all-DB dump+restore, ✅ import/restore resume, ✅ collection filters, ✅ JSONL split; ⬜ adaptive batching, ⬜ retry tuning, ⬜ multipart restart-resume |
+| 6 | RDF Import MVP | ✅ Complete | 4–6 weeks | N-Triples/N-Quads/Turtle parsers, graph model (RPT/PGT), bulk load, CLI |
 | 7 | Cloud Backends | Not started | 3–4 weeks | GCS, Azure, SeaweedFS support, docs, CI |
 
-**Critical path:** Phase 5 → (Phase 6, 7 in parallel). Phase 6 and 7 are independent given Phase 4 completion.
+**Critical path:** Phase 5 → (Phase 6 done; Phase 7 independent given Phase 4 completion).
 
 ---
 
@@ -27,12 +27,12 @@ Phase 5 hardens resume semantics across import/dump/restore, extends dump to cov
 **Current scope:** single-database dump via `DumpOptions::include_system`.
 
 **Deliverables:**
-- [ ] Extend `DumpOptions` with `all_databases: bool` flag.
-- [ ] Enumerate `/_api/database` to discover accessible databases.
-- [ ] Create a separate dump context (`/_api/replication`) per database.
-- [ ] Namespace manifest artifacts by database (e.g., `databases/my_db/collections/col1.jsonl`).
-- [ ] Manifest top-level field: `databases: Vec<{ name, artifact_count, byte_size }>`.
-- [ ] Restore reads top-level manifest, extracts DB name from artifacts, creates each DB and restores collections in order.
+- [x] Extend `DumpOptions` with `all_databases: bool` flag.
+- [x] Enumerate `/_api/database` to discover accessible databases.
+- [x] Create a separate dump context (`/_api/replication`) per database.
+- [x] Namespace manifest artifacts by database (`databases/{db}/...`, plus a `database` field on each `Artifact`).
+- [ ] Manifest top-level field: `databases: Vec<{ name, artifact_count, byte_size }>` (per-artifact `database` used instead).
+- [x] Restore reads the combined manifest, groups by `(database, collection)`, creates each DB, and restores its collections in order.
 
 **API changes:**
 ```rust
@@ -129,19 +129,11 @@ pub async fn run_import<S>(
 - For distributed restoration (Phase 5+), track per-shard completion.
 
 **Deliverables:**
-- [ ] Define `RestoreCheckpoint` struct:
-  ```rust
-  pub struct RestoreCheckpoint {
-      pub dump_manifest_path: String,
-      pub database: String,
-      pub completed_collections: Vec<String>,  // prefix of fully-restored collections
-      pub timestamp: SystemTime,
-  }
-  ```
-- [ ] Restore emits checkpoint after each collection.
-- [ ] CLI flag: `--checkpoint-path` (same as import).
-- [ ] On startup, detect and read checkpoint; skip to next incomplete collection.
-- [ ] Atomic checkpoint writes via `put_if_absent` (fail if checkpoint from different dump is present — safety check).
+- [x] Define `RestoreCheckpoint` struct (in `arangodb-tools-core::manifest`): `{ manifest: String /* fingerprint */, completed: Vec<String> /* "{db}::{collection}" */ }`.
+- [x] Restore emits checkpoint after each collection (best-effort write; a failure is logged, not fatal).
+- [x] CLI flag: `--checkpoint` (a local path or `s3://...`, same style as import).
+- [x] On startup, detect and read checkpoint; skip already-completed collections.
+- [x] Mismatch safety: refuse to resume when the checkpoint's manifest fingerprint differs from the current dump.
 
 **API changes:**
 ```rust
@@ -250,10 +242,10 @@ pub async fn restore_with_checkpoint(
 - Views and analyzers can also be filtered.
 
 **Deliverables:**
-- [ ] `FilterOptions { include_collections, exclude_collections, include_views, exclude_views }`.
-- [ ] Apply filters to inventory before dump; update manifest artifact list.
-- [ ] Restore reads manifest; filters already applied (manifest is the source of truth).
-- [ ] CLI flags: `--include-collections`, `--exclude-collections` (default: empty = include all).
+- [x] `FilterOptions { include_collections: Option<Regex>, exclude_collections: Option<Regex> }` (view filters deferred).
+- [x] Apply filters to inventory before dump; update manifest artifact list.
+- [x] Restore reads manifest; filters already applied (manifest is the source of truth).
+- [x] CLI flags: `--include-collections`, `--exclude-collections` (default: empty = include all).
 
 **API changes:**
 ```rust

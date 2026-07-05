@@ -23,7 +23,57 @@ use arangodb_tools_core::progress::{ProgressEvent, ProgressSink, ProgressSnapsho
 use arangodb_tools_core::{Error, Result};
 use bytes::Bytes;
 use futures::StreamExt;
+use regex::Regex;
 use sha2::{Digest, Sha256};
+
+/// Regex filters selecting which collections a dump includes.
+///
+/// A collection is dumped when it matches `include` (or `include` is unset)
+/// **and** does not match `exclude`.
+#[derive(Debug, Clone, Default)]
+pub struct FilterOptions {
+    /// Only collections whose name matches this pattern are included.
+    pub include_collections: Option<Regex>,
+    /// Collections whose name matches this pattern are excluded.
+    pub exclude_collections: Option<Regex>,
+}
+
+impl FilterOptions {
+    /// Compiles include/exclude patterns into filter options.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] if either pattern is not a valid regex.
+    pub fn new(include: Option<&str>, exclude: Option<&str>) -> Result<Self> {
+        let compile = |p: Option<&str>| -> Result<Option<Regex>> {
+            match p {
+                Some(pattern) => Regex::new(pattern).map(Some).map_err(|err| {
+                    Error::config(format!("invalid collection filter regex: {err}"))
+                }),
+                None => Ok(None),
+            }
+        };
+        Ok(Self {
+            include_collections: compile(include)?,
+            exclude_collections: compile(exclude)?,
+        })
+    }
+
+    /// Returns `true` if a collection named `name` passes the filters.
+    #[must_use]
+    pub fn accepts(&self, name: &str) -> bool {
+        if let Some(include) = &self.include_collections {
+            if !include.is_match(name) {
+                return false;
+            }
+        }
+        if let Some(exclude) = &self.exclude_collections {
+            if exclude.is_match(name) {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 /// Options controlling a dump.
 #[derive(Debug, Clone)]
@@ -33,6 +83,8 @@ pub struct DumpOptions {
     /// Dump all accessible databases (writes per-database artifacts under
     /// `databases/{name}/...` and produces a combined manifest).
     pub all_databases: bool,
+    /// Regex filters selecting which collections to dump.
+    pub filters: FilterOptions,
     /// Compression for data artifacts.
     pub compression: Compression,
     /// Replication-batch TTL, in seconds (extended before each collection).
@@ -52,6 +104,7 @@ impl Default for DumpOptions {
         Self {
             include_system: false,
             all_databases: false,
+            filters: FilterOptions::default(),
             compression: Compression::None,
             batch_ttl_secs: 600,
             chunk_size: 8 * 1024 * 1024,
@@ -126,6 +179,7 @@ pub async fn run_dump_with_progress(
                 options,
                 &batch,
                 &prefix,
+                Some(&db),
                 &mut manifest,
                 &mut state,
             )
@@ -191,7 +245,17 @@ async fn dump_with_batch(
         options.tool_version.clone(),
         options.created_at.clone(),
     );
-    dump_db_into_manifest(client, store, options, batch, "", &mut manifest, progress).await?;
+    dump_db_into_manifest(
+        client,
+        store,
+        options,
+        batch,
+        "",
+        None,
+        &mut manifest,
+        progress,
+    )
+    .await?;
     let manifest_json = manifest.to_json()?;
     store
         .put_stream(
@@ -203,12 +267,14 @@ async fn dump_with_batch(
 }
 
 /// Core per-database dump logic which appends artifacts into `manifest`.
+#[allow(clippy::too_many_arguments)]
 async fn dump_db_into_manifest(
     client: &ArangoClient,
     store: &dyn ObjectStore,
     options: &DumpOptions,
     batch: &str,
     path_prefix: &str,
+    database: Option<&str>,
     manifest: &mut Manifest,
     progress: &mut DumpProgress<'_>,
 ) -> Result<()> {
@@ -225,13 +291,30 @@ async fn dump_db_into_manifest(
             .ok_or_else(|| Error::config("inventory collection is missing a name"))?
             .to_string();
 
+        // Apply include/exclude filters (system collections bypass filtering so
+        // an include pattern for user data doesn't drop required system ones).
+        if !collection.is_system() && !options.filters.accepts(&name) {
+            continue;
+        }
+
         // Keep the snapshot alive across collections.
         client
             .replication_batch_extend(batch, options.batch_ttl_secs)
             .await?;
 
-        write_structure_with_prefix(store, path_prefix, &name, collection, manifest).await?;
-        write_data_with_prefix(client, store, options, batch, path_prefix, &name, manifest).await?;
+        write_structure_with_prefix(store, path_prefix, database, &name, collection, manifest)
+            .await?;
+        write_data_with_prefix(
+            client,
+            store,
+            options,
+            batch,
+            path_prefix,
+            database,
+            &name,
+            manifest,
+        )
+        .await?;
 
         progress.collection_done(data_bytes(manifest));
     }
@@ -243,6 +326,7 @@ async fn dump_db_into_manifest(
 async fn write_structure_with_prefix(
     store: &dyn ObjectStore,
     prefix: &str,
+    database: Option<&str>,
     name: &str,
     collection: &arangodb_client::InventoryCollection,
     manifest: &mut Manifest,
@@ -264,6 +348,7 @@ async fn write_structure_with_prefix(
         byte_size: meta.size,
         checksum: None,
         collection: Some(name.to_string()),
+        database: database.map(str::to_string),
         part: None,
     });
     Ok(())
@@ -272,12 +357,14 @@ async fn write_structure_with_prefix(
 /// Streams a collection's replication dump to a (optionally compressed) data
 /// artifact under `prefix` (empty for a single-database dump), recording its
 /// size and checksum.
+#[allow(clippy::too_many_arguments)]
 async fn write_data_with_prefix(
     client: &ArangoClient,
     store: &dyn ObjectStore,
     options: &DumpOptions,
     batch: &str,
     prefix: &str,
+    database: Option<&str>,
     name: &str,
     manifest: &mut Manifest,
 ) -> Result<()> {
@@ -315,6 +402,7 @@ async fn write_data_with_prefix(
             value: hex(&digest),
         }),
         collection: Some(name.to_string()),
+        database: database.map(str::to_string),
         part: Some(0),
     });
     Ok(())
@@ -379,5 +467,45 @@ fn map_compression(compression: Compression) -> ManifestCompression {
         Compression::None => ManifestCompression::None,
         Compression::Gzip => ManifestCompression::Gzip,
         Compression::Zstd => ManifestCompression::Zstd,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_filters_accept_everything() {
+        let filters = FilterOptions::default();
+        assert!(filters.accepts("users"));
+        assert!(filters.accepts("anything"));
+    }
+
+    #[test]
+    fn include_filter_selects_matching_names() {
+        let filters = FilterOptions::new(Some("^col_[0-9]+$"), None).unwrap();
+        assert!(filters.accepts("col_1"));
+        assert!(filters.accepts("col_42"));
+        assert!(!filters.accepts("users"));
+        assert!(!filters.accepts("col_x"));
+    }
+
+    #[test]
+    fn exclude_filter_removes_matching_names() {
+        let filters = FilterOptions::new(None, Some("^tmp_")).unwrap();
+        assert!(filters.accepts("users"));
+        assert!(!filters.accepts("tmp_cache"));
+    }
+
+    #[test]
+    fn exclude_takes_precedence_over_include() {
+        let filters = FilterOptions::new(Some("^col_"), Some("_tmp$")).unwrap();
+        assert!(filters.accepts("col_users"));
+        assert!(!filters.accepts("col_users_tmp"));
+    }
+
+    #[test]
+    fn invalid_regex_is_a_config_error() {
+        assert!(FilterOptions::new(Some("("), None).is_err());
     }
 }

@@ -56,3 +56,4 @@ csv-async = { version = "1", default-features = false, features = ["tokio"] }
 object_store = { version = "0.13", features = ["aws"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
+regex = "1"

@@ -32,7 +32,7 @@ Q2 (In Progress)
 
 ## Phase 5: Multi-Database, Resume Hardening, Splitting
 
-**Status:** Not started  
+**Status:** In progress — done: all-database dump + restore (5.1), import resume (5.2), restore resume (5.3), JSONL split (5.4), collection filters (5.6). Remaining: adaptive batching (5.5), retry tuning (5.7), split leftovers (JSON/CSV, multipart restart-resume).  
 **Duration:** 6–8 weeks  
 **Dependency:** Phase 4 complete (dump/restore working)  
 **Owned by:** [TBD]  
@@ -87,7 +87,7 @@ Q2 (In Progress)
 
 ## Phase 6: RDF Import MVP
 
-**Status:** Not started  
+**Status:** Complete — N-Triples/N-Quads/Turtle parsers, deterministic keys, literal policies, RPT/PGT graph models, streaming edges, and the `arangox rdf import` CLI.  
 **Duration:** 4–6 weeks  
 **Dependency:** Phase 5.2 (import pipeline) or concurrent  
 **Owned by:** [TBD]  
@@ -197,10 +197,10 @@ Q2 (In Progress)
 ### Critical Path (Must Complete in Order)
 
 ```
-[ ] Phase 5.1: All-Databases Dump
-[ ] Phase 5.2: Import Resume
-[ ] Phase 5.3: Restore Resume
-[ ] Phase 5: Completion (split, batching, filters, retry)
+[x] Phase 5.1: All-Databases Dump + multi-database restore
+[x] Phase 5.2: Import Resume
+[x] Phase 5.3: Restore Resume
+[~] Phase 5: Completion (split done for JSONL, filters done; batching + retry tuning remain)
 ```
 
 ### High Value (Can Start After Phase 5)

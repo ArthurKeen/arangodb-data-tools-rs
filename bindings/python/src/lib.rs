@@ -566,6 +566,7 @@ async fn do_restore(params: RestoreParams) -> Result<RestoreOutcome> {
         create_database: params
             .create_database
             .then(|| params.conn.database.clone()),
+        ..RestoreOptions::default()
     };
 
     let summary = run_restore_with_progress(&client, store.as_ref(), &options, None).await?;

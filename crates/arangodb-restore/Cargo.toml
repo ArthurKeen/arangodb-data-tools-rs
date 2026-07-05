@@ -20,6 +20,7 @@ arangodb-storage = { path = "../arangodb-storage" }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 tokio-util = { workspace = true }
 

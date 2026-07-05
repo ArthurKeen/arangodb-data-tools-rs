@@ -84,6 +84,19 @@ Dump a database and restore it (the manifest is the source of truth):
 ```bash
 arangox dump --database mydb --output ./dump-mydb
 arangox restore --database mydb-copy --input ./dump-mydb --create-database
+
+# Dump only selected collections (regex include/exclude)
+arangox dump --database mydb --output ./dump-mydb \
+  --include-collections '^app_' --exclude-collections '_tmp$'
+
+# Dump every accessible database into one manifest (artifacts under
+# databases/{name}/...); restore recreates each database and its collections
+arangox dump --all-databases --output ./dump-all
+arangox restore --input ./dump-all
+
+# Resumable restore: re-running with the same checkpoint skips collections
+# already restored (the checkpoint is bound to the dump and refuses a mismatch)
+arangox restore --input ./dump-mydb --checkpoint ./restore.progress.json
 ```
 
 Bulk-load RDF (N-Triples, N-Quads, or Turtle) into a property graph. Each IRI/blank node becomes a vertex, and each triple becomes an edge carrying the predicate IRI; keys are deterministic (hashed) so re-importing the same data is idempotent. The vertex and edge collections are created if missing:

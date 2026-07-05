@@ -105,6 +105,57 @@ impl ImportCheckpoint {
     }
 }
 
+/// A contiguous-prefix checkpoint for a resumable restore.
+///
+/// Restore processes collections in a deterministic order and, after each one
+/// is fully restored (data + indexes), records its identifier here. On restart,
+/// every already-completed collection is skipped. The [`Self::manifest`]
+/// fingerprint guards against resuming against a *different* dump.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreCheckpoint {
+    /// A fingerprint of the dump manifest this checkpoint belongs to, used to
+    /// refuse resuming a restore against a manifest it was not created for.
+    pub manifest: String,
+    /// Identifiers of fully-restored collections, in restore order. The
+    /// identifier is `"{database}::{collection}"` (`database` empty for a
+    /// single-database dump).
+    pub completed: Vec<String>,
+}
+
+impl RestoreCheckpoint {
+    /// Creates an empty checkpoint bound to a manifest fingerprint.
+    #[must_use]
+    pub fn new(manifest: impl Into<String>) -> Self {
+        Self {
+            manifest: manifest.into(),
+            completed: Vec::new(),
+        }
+    }
+
+    /// Returns `true` if `id` has already been recorded as completed.
+    #[must_use]
+    pub fn contains(&self, id: &str) -> bool {
+        self.completed.iter().any(|c| c == id)
+    }
+
+    /// Serializes the checkpoint to compact JSON.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::Serialization`] if serialization fails.
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// Parses a checkpoint from JSON bytes.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::Serialization`] if the bytes are not a valid
+    /// checkpoint document.
+    pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
 /// Encryption metadata recorded in the manifest.
 ///
 /// Enterprise-encrypted payloads are not produced or readable by this project
@@ -151,6 +202,11 @@ pub struct Artifact {
     /// The collection this artifact belongs to, if applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
+    /// The source database this artifact belongs to, for multi-database dumps.
+    /// `None` means the dump is single-database and restores into the target
+    /// database chosen at restore time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     /// The part number for split data artifacts, if applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<u32>,
@@ -217,6 +273,26 @@ impl Manifest {
     pub fn from_json(json: &str) -> Result<Self> {
         Ok(serde_json::from_str(json)?)
     }
+
+    /// A deterministic identity fingerprint for this dump, used by
+    /// [`RestoreCheckpoint`] to detect a mismatched dump on resume.
+    ///
+    /// Combines the source database, creation timestamp, and the ordered
+    /// artifact paths — enough to distinguish two different dumps without a
+    /// cryptographic dependency here.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        let mut parts = String::new();
+        parts.push_str(&self.database);
+        parts.push('|');
+        parts.push_str(&self.created_at);
+        parts.push('|');
+        for artifact in &self.artifacts {
+            parts.push_str(&artifact.path);
+            parts.push(',');
+        }
+        parts
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +312,7 @@ mod tests {
                 value: "deadbeef".to_owned(),
             }),
             collection: Some("users".to_owned()),
+            database: None,
             part: Some(0),
         });
         manifest
@@ -287,5 +364,26 @@ mod tests {
         let json = checkpoint.to_json().unwrap();
         let parsed = ImportCheckpoint::from_json(json.as_bytes()).unwrap();
         assert_eq!(checkpoint, parsed);
+    }
+
+    #[test]
+    fn restore_checkpoint_round_trips_and_tracks_completion() {
+        let mut checkpoint = RestoreCheckpoint::new("fp-1");
+        checkpoint.completed.push("::users".to_string());
+        assert!(checkpoint.contains("::users"));
+        assert!(!checkpoint.contains("::orders"));
+        let json = checkpoint.to_json().unwrap();
+        let parsed = RestoreCheckpoint::from_json(json.as_bytes()).unwrap();
+        assert_eq!(checkpoint, parsed);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_dumps() {
+        let a = Manifest::new("db", "0", "2026-01-01T00:00:00Z");
+        let b = Manifest::new("db", "0", "2026-02-02T00:00:00Z");
+        assert_ne!(a.fingerprint(), b.fingerprint());
+        // Same identity fields yield the same fingerprint.
+        let a2 = Manifest::new("db", "0", "2026-01-01T00:00:00Z");
+        assert_eq!(a.fingerprint(), a2.fingerprint());
     }
 }

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use arangodb_dump::{run_dump_with_progress, DumpOptions};
+use arangodb_dump::{run_dump_with_progress, DumpOptions, FilterOptions};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::Result;
 use clap::Args;
@@ -31,6 +31,20 @@ pub(crate) struct DumpArgs {
     #[arg(long)]
     pub include_system: bool,
 
+    /// Dump every accessible database. Artifacts are written under
+    /// `databases/{name}/...` and described by a single combined manifest.
+    #[arg(long)]
+    pub all_databases: bool,
+
+    /// Only dump collections whose name matches this regular expression.
+    #[arg(long, value_name = "REGEX")]
+    pub include_collections: Option<String>,
+
+    /// Skip collections whose name matches this regular expression (applied
+    /// after `--include-collections`).
+    #[arg(long, value_name = "REGEX")]
+    pub exclude_collections: Option<String>,
+
     /// Replication-batch TTL in seconds (the snapshot keep-alive interval).
     #[arg(long, default_value_t = 600)]
     pub batch_ttl_secs: u32,
@@ -41,8 +55,15 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
     let client = args.connection.build_client()?;
     let store = open_store_root(&args.output)?;
 
+    let filters = FilterOptions::new(
+        args.include_collections.as_deref(),
+        args.exclude_collections.as_deref(),
+    )?;
+
     let options = DumpOptions {
         include_system: args.include_system,
+        all_databases: args.all_databases,
+        filters,
         // `--compression` here is an explicit codec, never auto (no extension
         // to sniff for a dump root).
         compression: args.compression.resolve(""),
