@@ -5,7 +5,7 @@
 //! full path: parse -> build graph model -> load vertex + edge collections.
 
 use arangodb_client::ArangoClient;
-use arangodb_rdf::{import_rdf, RdfFormat, RdfOptions};
+use arangodb_rdf::{import_rdf, GraphModel, RdfFormat, RdfOptions};
 
 /// Builds a client from the CI/integration environment, or `None` when no
 /// server is configured (so the test no-ops in plain `cargo test`).
@@ -127,4 +127,57 @@ async fn imports_turtle_with_prefixes_and_a_keyword() {
     assert_eq!(client.collection_count(edge).await.unwrap(), 3);
 
     reset(&client, vertex, edge).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpt_routes_terms_into_typed_collections() {
+    let Some(client) = live_client() else {
+        eprintln!("ARANGO_ENDPOINT not set; skipping live RDF RPT test");
+        return;
+    };
+    let base = "arangox_it_rdf_rpt";
+    let edge = "arangox_it_rdf_rpt_stmt";
+    let uriref = format!("{base}_URIRef");
+    let bnode = format!("{base}_BNode");
+    let literal = format!("{base}_Literal");
+    for c in [&uriref, &bnode, &literal, &edge.to_string()] {
+        let _ = client.drop_collection(c).await;
+    }
+
+    // 2 IRIs + 1 blank + 1 literal, 3 statements. Under RPT the literal policy
+    // is ignored and the literal becomes its own vertex.
+    let ntriples = concat!(
+        "<http://ex/alice> <http://ex/knows> <http://ex/bob> .\n",
+        "<http://ex/alice> <http://ex/homepage> _:site .\n",
+        "<http://ex/alice> <http://ex/name> \"Alice\" .\n",
+    );
+    let mut options = RdfOptions::new(base, edge);
+    options.graph_model = GraphModel::Rpt;
+
+    let summary = import_rdf(
+        &client,
+        std::io::Cursor::new(ntriples.as_bytes().to_vec()),
+        RdfFormat::NTriples,
+        &options,
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .expect("rpt import succeeds");
+
+    assert_eq!(summary.triples_read, 3);
+    assert_eq!(summary.vertices_created, 4, "alice, bob, blank, literal");
+    assert_eq!(summary.edges_created, 3, "one edge per statement");
+    assert_eq!(
+        client.collection_count(&uriref).await.unwrap(),
+        2,
+        "alice+bob"
+    );
+    assert_eq!(client.collection_count(&bnode).await.unwrap(), 1);
+    assert_eq!(client.collection_count(&literal).await.unwrap(), 1);
+    assert_eq!(client.collection_count(edge).await.unwrap(), 3);
+
+    for c in [&uriref, &bnode, &literal, &edge.to_string()] {
+        let _ = client.drop_collection(c).await;
+    }
 }

@@ -86,25 +86,124 @@ impl RdfLiteralPolicy {
     }
 }
 
+/// Which graph model the RDF data is mapped into.
+///
+/// This mirrors the two transformation families in the ArangoRDF Python
+/// library: an idiomatic labeled property graph, or a topology-preserving
+/// mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphModel {
+    /// **Property-graph transformation** (default): resources share a single
+    /// vertex collection and literals are handled by [`RdfLiteralPolicy`]
+    /// (dropped, attached as vertex properties, or materialized). Idiomatic to
+    /// query, but not lossless.
+    #[default]
+    Pgt,
+    /// **RDF-topology-preserving transformation**: every term becomes a vertex,
+    /// routed by type into `<base>_URIRef`, `<base>_BNode`, and `<base>_Literal`
+    /// collections, and every statement becomes an edge in the edge (statement)
+    /// collection. Literals are always materialized (the literal policy is
+    /// ignored). Faithful to the RDF graph.
+    Rpt,
+}
+
+impl GraphModel {
+    /// Parses a model name (case-insensitive): `pgt`/`property-graph` or
+    /// `rpt`/`topology`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] for an unrecognized name.
+    pub fn parse(name: &str) -> Result<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "pgt" | "property-graph" | "lpg" => Ok(Self::Pgt),
+            "rpt" | "topology" | "rdf" => Ok(Self::Rpt),
+            other => Err(Error::config(format!(
+                "unknown graph model '{other}'; expected pgt or rpt"
+            ))),
+        }
+    }
+}
+
+/// The collection and key at which a term is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    /// The vertex collection that holds the term.
+    pub collection: String,
+    /// The deterministic document key.
+    pub key: String,
+}
+
 /// Options controlling the RDF graph model.
 #[derive(Debug, Clone)]
 pub struct RdfOptions {
-    /// Collection that receives resource (and literal) vertices.
+    /// Vertex collection (PGT) or base name for the term-typed collections
+    /// (RPT: `<base>_URIRef` / `<base>_BNode` / `<base>_Literal`).
     pub vertex_collection: String,
-    /// Edge collection that receives predicate edges.
+    /// Edge collection that receives predicate (statement) edges.
     pub edge_collection: String,
-    /// How literal-valued objects are handled.
+    /// Which graph model to build.
+    pub graph_model: GraphModel,
+    /// How literal-valued objects are handled (PGT only; ignored under RPT).
     pub literal_policy: RdfLiteralPolicy,
 }
 
 impl RdfOptions {
-    /// Creates options with the default (`NoLiterals`) policy.
+    /// Creates options with the default model (`Pgt`) and policy
+    /// (`NoLiterals`).
     #[must_use]
     pub fn new(vertex_collection: impl Into<String>, edge_collection: impl Into<String>) -> Self {
         Self {
             vertex_collection: vertex_collection.into(),
             edge_collection: edge_collection.into(),
+            graph_model: GraphModel::default(),
             literal_policy: RdfLiteralPolicy::NoLiterals,
+        }
+    }
+
+    /// The placement of a subject/object resource under the current model.
+    #[must_use]
+    pub fn resource_placement(&self, resource: &RdfResource) -> Placement {
+        let collection = match (self.graph_model, resource) {
+            (GraphModel::Pgt, _) => self.vertex_collection.clone(),
+            (GraphModel::Rpt, RdfResource::Iri(_)) => format!("{}_URIRef", self.vertex_collection),
+            (GraphModel::Rpt, RdfResource::BlankNode(_)) => {
+                format!("{}_BNode", self.vertex_collection)
+            }
+        };
+        Placement {
+            collection,
+            key: resource_key(resource),
+        }
+    }
+
+    /// The placement of a materialized literal under the current model.
+    #[must_use]
+    pub fn literal_placement(
+        &self,
+        value: &str,
+        datatype: Option<&str>,
+        language: Option<&str>,
+    ) -> Placement {
+        let collection = match self.graph_model {
+            GraphModel::Pgt => self.vertex_collection.clone(),
+            GraphModel::Rpt => format!("{}_Literal", self.vertex_collection),
+        };
+        Placement {
+            collection,
+            key: literal_key(value, datatype, language),
+        }
+    }
+
+    /// The vertex collections that must exist for the current model.
+    #[must_use]
+    pub fn vertex_collections(&self) -> Vec<String> {
+        match self.graph_model {
+            GraphModel::Pgt => vec![self.vertex_collection.clone()],
+            GraphModel::Rpt => vec![
+                format!("{}_URIRef", self.vertex_collection),
+                format!("{}_BNode", self.vertex_collection),
+                format!("{}_Literal", self.vertex_collection),
+            ],
         }
     }
 }
@@ -149,10 +248,11 @@ pub fn literal_key(value: &str, datatype: Option<&str>, language: Option<&str>) 
     )
 }
 
-/// The deterministic key for a predicate edge.
+/// The deterministic key for a predicate edge, from the fully-qualified
+/// endpoint ids (`collection/key`) so edges stay unique across collections.
 #[must_use]
-pub fn edge_key(from_key: &str, predicate: &str, to_key: &str) -> String {
-    hash_key("rdf:edge", &[from_key, predicate, to_key])
+pub fn edge_key(from_id: &str, predicate: &str, to_id: &str) -> String {
+    hash_key("rdf:edge", &[from_id, predicate, to_id])
 }
 
 /// Builds the vertex document for a resource.
@@ -180,18 +280,16 @@ pub fn literal_vertex(value: &str, datatype: Option<&str>, language: Option<&str
     doc
 }
 
-/// Builds an edge document connecting two vertices in `vertex_collection`.
+/// Builds an edge document connecting two placed vertices, carrying the
+/// predicate IRI. Endpoints may live in different collections (RPT).
 #[must_use]
-pub fn edge_document(
-    vertex_collection: &str,
-    from_key: &str,
-    to_key: &str,
-    predicate: &str,
-) -> Value {
+pub fn edge_document(from: &Placement, to: &Placement, predicate: &str) -> Value {
+    let from_id = format!("{}/{}", from.collection, from.key);
+    let to_id = format!("{}/{}", to.collection, to.key);
     json!({
-        "_key": edge_key(from_key, predicate, to_key),
-        "_from": format!("{vertex_collection}/{from_key}"),
-        "_to": format!("{vertex_collection}/{to_key}"),
+        "_key": edge_key(&from_id, predicate, &to_id),
+        "_from": from_id,
+        "_to": to_id,
         "predicate": predicate,
     })
 }

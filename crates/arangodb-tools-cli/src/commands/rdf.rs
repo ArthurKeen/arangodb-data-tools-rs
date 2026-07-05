@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use arangodb_import::decompress;
-use arangodb_rdf::{import_rdf_with_progress, RdfFormat, RdfLiteralPolicy, RdfOptions};
+use arangodb_rdf::{import_rdf_with_progress, GraphModel, RdfFormat, RdfLiteralPolicy, RdfOptions};
 use arangodb_storage::{ObjectPath, ObjectStore, ObjectStoreBackend, StorageUri};
 use arangodb_tools_core::config::{default_workers, BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -28,7 +28,8 @@ pub(crate) struct RdfArgs {
 /// RDF subcommands.
 #[derive(Debug, Subcommand)]
 pub(crate) enum RdfCommand {
-    /// Bulk-import RDF (N-Triples/N-Quads) into a vertex + edge collection.
+    /// Bulk-import RDF (N-Triples/N-Quads/Turtle) into a property graph (PGT)
+    /// or topology-preserving graph (RPT).
     Import(RdfImportArgs),
 }
 
@@ -48,17 +49,25 @@ pub(crate) struct RdfImportArgs {
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
 
-    /// Collection that receives resource (and literal) vertices. Created as a
-    /// document collection if it does not exist.
+    /// Graph model: `pgt` (property graph, default) or `rpt`
+    /// (RDF-topology-preserving). Under RPT, terms are routed into
+    /// `<vertex-collection>_URIRef`/`_BNode`/`_Literal` collections and every
+    /// statement becomes an edge; the literal policy is ignored.
+    #[arg(long, value_enum, default_value_t = GraphModelArg::Pgt)]
+    pub graph_model: GraphModelArg,
+
+    /// Vertex collection (PGT), or the base name for the term-typed collections
+    /// under RPT. Collections are created as document collections if missing.
     #[arg(long)]
     pub vertex_collection: String,
 
-    /// Edge collection that receives predicate edges. Created as an edge
-    /// collection if it does not exist.
+    /// Edge collection that receives predicate (statement) edges. Created as an
+    /// edge collection if it does not exist.
     #[arg(long)]
     pub edge_collection: String,
 
-    /// How to handle triples whose object is a literal.
+    /// How to handle triples whose object is a literal (PGT only; RPT always
+    /// materializes literals as their own vertices).
     #[arg(long, value_enum, default_value_t = LiteralPolicyArg::NoLiterals)]
     pub literal_policy: LiteralPolicyArg,
 
@@ -104,6 +113,34 @@ impl From<LiteralPolicyArg> for RdfLiteralPolicy {
     }
 }
 
+/// Graph model, mirrored for clap value parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GraphModelArg {
+    /// Property-graph transformation (idiomatic LPG, default).
+    Pgt,
+    /// RDF-topology-preserving transformation (faithful term-typed graph).
+    Rpt,
+}
+
+impl From<GraphModelArg> for GraphModel {
+    fn from(model: GraphModelArg) -> Self {
+        match model {
+            GraphModelArg::Pgt => GraphModel::Pgt,
+            GraphModelArg::Rpt => GraphModel::Rpt,
+        }
+    }
+}
+
+impl GraphModelArg {
+    /// The canonical short name (used in JSON output).
+    fn as_str(self) -> &'static str {
+        match self {
+            GraphModelArg::Pgt => "pgt",
+            GraphModelArg::Rpt => "rpt",
+        }
+    }
+}
+
 /// Dispatches an `rdf` subcommand.
 pub(crate) async fn run(args: RdfArgs, reporter: Reporter) -> Result<()> {
     match args.command {
@@ -119,6 +156,7 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
     let options = RdfOptions {
         vertex_collection: args.vertex_collection.clone(),
         edge_collection: args.edge_collection.clone(),
+        graph_model: args.graph_model.into(),
         literal_policy: args.literal_policy.into(),
     };
 
@@ -181,6 +219,7 @@ async fn run_import(args: RdfImportArgs, reporter: Reporter) -> Result<()> {
                 "operation": "rdf-import",
                 "status": "ok",
                 "format": format_name(format),
+                "graph_model": args.graph_model.as_str(),
                 "vertex_collection": args.vertex_collection,
                 "edge_collection": args.edge_collection,
                 "triples_read": summary.triples_read,

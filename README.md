@@ -94,7 +94,18 @@ arangox rdf import --database mydb \
   --vertex-collection rdf_nodes --edge-collection rdf_links
 ```
 
-Literal-valued objects are dropped by default (`--literal-policy no-literals`); use `--literal-policy vertex-property` to attach them to the subject vertex, or `--literal-policy materialize` to give each literal its own vertex plus an edge. The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star is not supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered.
+Two graph models are supported via `--graph-model`, mirroring the [ArangoRDF](https://github.com/ArangoDB-Community/ArangoRDF) library:
+
+- **`pgt`** (property graph, default) — resources share the vertex collection and literals are handled by `--literal-policy`: dropped (`no-literals`, default), attached to the subject vertex (`vertex-property`), or given their own vertex plus an edge (`materialize`). Idiomatic to query.
+- **`rpt`** (RDF-topology-preserving) — every term becomes a vertex, routed by type into `<vertex-collection>_URIRef`, `_BNode`, and `_Literal`, and every statement becomes an edge. Literals are always materialized (the literal policy is ignored). Faithful to the RDF graph:
+
+```bash
+arangox rdf import --database mydb --graph-model rpt \
+  --input graph.ttl \
+  --vertex-collection rdf --edge-collection rdf_stmt
+```
+
+The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star, RDFS/OWL inference, `rdf:type`-based collection bucketing, and ArangoDB→RDF export are not (yet) supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered.
 
 Object storage uses the `AWS_*` environment for credentials/region/endpoint, which also works against MinIO/LocalStack and SeaweedFS's S3 gateway. `gs://` and `az://` are not wired yet.
 
