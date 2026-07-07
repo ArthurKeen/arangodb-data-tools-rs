@@ -57,6 +57,9 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       OBJECT_STORE_S3_TEST_BUCKET: arangox-test
+      # Runs the URI-driven cross-backend suite against MinIO on every PR; the
+      # nightly workflow runs the same suite against SeaweedFS/Azurite/GCS.
+      STORAGE_TEST_URI: s3://arangox-test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

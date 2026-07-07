@@ -118,7 +118,15 @@ fn import_file<'py>(
     max_in_flight_bytes: Option<usize>,
     adaptive: Option<bool>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let conn = Conn::new(endpoint, database, username, password, token, insecure, request_timeout_secs);
+    let conn = Conn::new(
+        endpoint,
+        database,
+        username,
+        password,
+        token,
+        insecure,
+        request_timeout_secs,
+    );
     let params = ImportParams {
         conn,
         collection,
@@ -266,7 +274,15 @@ fn export<'py>(
     insecure: bool,
     request_timeout_secs: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let conn = Conn::new(endpoint, database, username, password, token, insecure, request_timeout_secs);
+    let conn = Conn::new(
+        endpoint,
+        database,
+        username,
+        password,
+        token,
+        insecure,
+        request_timeout_secs,
+    );
     let params = ExportParams {
         conn,
         output,
@@ -426,7 +442,15 @@ fn dump<'py>(
     insecure: bool,
     request_timeout_secs: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let conn = Conn::new(endpoint, database, username, password, token, insecure, request_timeout_secs);
+    let conn = Conn::new(
+        endpoint,
+        database,
+        username,
+        password,
+        token,
+        insecure,
+        request_timeout_secs,
+    );
     let params = DumpParams {
         conn,
         output,
@@ -526,7 +550,15 @@ fn restore<'py>(
     insecure: bool,
     request_timeout_secs: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let conn = Conn::new(endpoint, database, username, password, token, insecure, request_timeout_secs);
+    let conn = Conn::new(
+        endpoint,
+        database,
+        username,
+        password,
+        token,
+        insecure,
+        request_timeout_secs,
+    );
     let params = RestoreParams {
         conn,
         input,
@@ -565,9 +597,7 @@ async fn do_restore(params: RestoreParams) -> Result<RestoreOutcome> {
     let store = open_store_root(&params.input)?;
     let options = RestoreOptions {
         overwrite: params.overwrite,
-        create_database: params
-            .create_database
-            .then(|| params.conn.database.clone()),
+        create_database: params.create_database.then(|| params.conn.database.clone()),
         ..RestoreOptions::default()
     };
 
@@ -723,10 +753,9 @@ fn open_output(output: &str) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
 /// Resolves a local output path to a [`LocalFileSystem`] rooted at its parent
 /// and an object path of just the file name.
 fn open_local(path: &Path) -> Result<(Box<dyn ObjectStore>, ObjectPath)> {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| Error::config(format!("output path has no file name: {}", path.display())))?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        Error::config(format!("output path has no file name: {}", path.display()))
+    })?;
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),

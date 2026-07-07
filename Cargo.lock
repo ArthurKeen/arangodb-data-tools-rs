@@ -190,6 +190,8 @@ dependencies = [
  "bytes",
  "futures",
  "object_store",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

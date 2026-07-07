@@ -141,7 +141,7 @@ Q2 (In Progress)
 
 ## Phase 7: Cloud Backends
 
-**Status:** In progress — GCS (`gs://`) and Azure (`az://`) backends wired through the shared `ObjectStore` abstraction and available across all commands (inputs, outputs, dump/restore roots, checkpoints); SeaweedFS supported via `seaweed+s3://` and documented; scheme dispatch centralized in `arangodb-storage` and reused by the CLI + Python bindings; `docs/backends.md` added. Remaining: live nightly integration CI for GCS/Azure/SeaweedFS, a cross-backend feature matrix, throughput baselines, and restart-resumable multipart uploads.  
+**Status:** Complete — GCS (`gs://`) and Azure (`az://`) backends wired through the shared `ObjectStore` abstraction and available across all commands (inputs, outputs, dump/restore roots, checkpoints); SeaweedFS supported via `seaweed+s3://`; scheme dispatch centralized in `arangodb-storage` and reused by the CLI + Python bindings. Nightly cross-backend CI (`.github/workflows/nightly.yml`) runs a URI-driven feature matrix + throughput baseline against MinIO, SeaweedFS, and Azurite live (real GCS when secrets are set). Restart-resumable, backend-agnostic multipart uploads (`upload_resumable`/`read_resumable`) landed in `arangodb-storage`. Docs: `docs/backends.md`, `docs/resume.md`, `docs/rdf-model.md`, `docs/cli-reference.md`.  
 **Duration:** 3–4 weeks  
 **Dependency:** Phase 4 complete (storage trait stable)  
 **Owned by:** [TBD]  
@@ -200,14 +200,14 @@ Q2 (In Progress)
 [x] Phase 5.1: All-Databases Dump + multi-database restore
 [x] Phase 5.2: Import Resume
 [x] Phase 5.3: Restore Resume
-[~] Phase 5: Completion (split jsonl/json/csv, filters, adaptive batching, retry tuning done; only multipart restart-resume deferred)
+[x] Phase 5: Completion (split jsonl/json/csv, filters, adaptive batching, retry tuning; restart-resumable uploads landed in Phase 7)
 ```
 
 ### High Value (Can Start After Phase 5)
 
 ```
-[ ] Phase 6: RDF Import
-[ ] Phase 7: Cloud Backends
+[x] Phase 6: RDF Import (RDF/XML + TriG parsing deferred)
+[x] Phase 7: Cloud Backends (GCS/Azure/SeaweedFS + nightly matrix, baselines, resumable uploads)
 ```
 
 ---

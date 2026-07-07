@@ -9,11 +9,16 @@
 pub mod compression;
 pub mod local;
 pub mod object_store_backend;
+pub mod resumable;
 pub mod store;
 pub mod uri;
 
 pub use compression::{compress, decompress, Compression};
 pub use local::LocalFileSystem;
 pub use object_store_backend::ObjectStoreBackend;
+pub use resumable::{
+    delete_resumable, open_resumable, read_resumable, upload_resumable, BytesPartSource,
+    FilePartSource, PartSource, ResumableUpload, DEFAULT_PART_SIZE,
+};
 pub use store::{ByteRange, ByteStream, MetadataStream, ObjectMetadata, ObjectPath, ObjectStore};
 pub use uri::{StorageScheme, StorageUri};

@@ -177,6 +177,15 @@ Two integration paths are supported:
 1. **Subprocess + `--output json`** (works for all tools today): run `arangox`, parse stdout for the result, read stderr line-by-line for progress, and use the exit code for success/failure. Language-agnostic.
 2. **Native Python bindings** (sketch): a PyO3/maturin module under [`bindings/python`](bindings/python) binds the import pipeline in-process as `arangox.import_file(...)`, returning a `dict`. See its README for build/usage.
 
+## Documentation
+
+- [`docs/cli-reference.md`](docs/cli-reference.md) — every subcommand and flag.
+- [`docs/backends.md`](docs/backends.md) — storage schemes and credentials.
+- [`docs/resume.md`](docs/resume.md) — checkpoints and restart-resumable uploads.
+- [`docs/rdf-model.md`](docs/rdf-model.md) — the RDF-to-graph mapping (PGT/RPT).
+- [`docs/benchmarks.md`](docs/benchmarks.md) — throughput baselines.
+- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — engineering plan.
+
 ## Compatibility
 
 - Targets ArangoDB **3.12** and current stable.

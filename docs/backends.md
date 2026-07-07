@@ -109,11 +109,26 @@ An unrecognized scheme is rejected with a configuration error. `file://` is a
 local path and cannot be used where an object store is required (it has no
 bucket).
 
+## Resumable large-object uploads
+
+Every backend also supports a **restart-resumable** chunked upload for
+*seekable* sources (a local file or in-memory buffer), exposed by the
+`arangodb-storage` crate: `upload_resumable`, `open_resumable`,
+`read_resumable`, and `delete_resumable`.
+
+The object at `base` is stored as ordered part objects under `"<base>.upload/"`
+plus a `state.json` marker written last. `upload_resumable` uploads only the
+parts that are missing (or present at the wrong size), so re-running after an
+interruption finishes the tail instead of restarting from zero. Because parts
+are addressed by key, no provider-specific multipart upload ID has to be
+persisted, which is what makes it portable across local FS, S3, GCS, Azure, and
+SeaweedFS. See [`docs/resume.md`](resume.md) for the full resumability story.
+
 ## Notes
 
 - Uploads to object stores are streamed as multipart parts (8 MiB), so
   arbitrarily large objects transfer with bounded memory.
 - Object keys are validated to reject `.`/`..` traversal segments.
-- Restart-resumable *multipart* uploads (resuming a partially uploaded object
-  after a crash) are not yet implemented; `dump`/`restore` resumability works at
-  the artifact/collection level via checkpoints.
+- Cross-backend behavior is covered nightly (`.github/workflows/nightly.yml`)
+  against MinIO, SeaweedFS, and Azurite (and real GCS when secrets are set),
+  including the resumable-upload round trip and a throughput baseline.

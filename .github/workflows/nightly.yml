@@ -1,0 +1,138 @@
+name: Nightly cross-backend
+
+# Live storage-backend coverage that is too heavy for every PR: a matrix that
+# runs the same URI-driven suite (crates/arangodb-storage/tests/backend_round_trip.rs)
+# against MinIO (S3), SeaweedFS (S3 gateway), and Azurite (Azure), plus a
+# secret-gated job for real Google Cloud Storage. Each backend also runs the
+# `throughput_baseline` benchmark and records MiB/s in the job summary.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  STORAGE_BENCH_MB: "64"
+
+jobs:
+  backends:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minio-s3
+            scheme: minio
+            uri: s3://arangox-test
+          - name: seaweedfs-s3
+            scheme: seaweed
+            uri: seaweed+s3://arangox-test
+          - name: azurite
+            scheme: azurite
+            uri: az://arangox-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # --- MinIO (S3) ---------------------------------------------------------
+      - name: Start MinIO and create the bucket
+        if: matrix.scheme == 'minio'
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          until curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null; do sleep 1; done
+          docker run --rm --network host --entrypoint sh minio/mc -c \
+            "mc alias set h http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing h/arangox-test"
+          {
+            echo "AWS_ENDPOINT=http://127.0.0.1:9000"
+            echo "AWS_ALLOW_HTTP=true"
+            echo "AWS_REGION=us-east-1"
+            echo "AWS_ACCESS_KEY_ID=minioadmin"
+            echo "AWS_SECRET_ACCESS_KEY=minioadmin"
+          } >> "$GITHUB_ENV"
+
+      # --- SeaweedFS (S3 gateway) --------------------------------------------
+      - name: Start SeaweedFS and create the bucket
+        if: matrix.scheme == 'seaweed'
+        run: |
+          docker run -d --name seaweedfs -p 8333:8333 -p 9333:9333 -p 8080:8080 \
+            chrislusf/seaweedfs server -s3 -dir=/data
+          # Wait for the S3 gateway to accept connections.
+          until curl -sf http://127.0.0.1:8333 >/dev/null 2>&1; do sleep 1; done
+          # SeaweedFS's S3 gateway accepts any credentials by default.
+          docker run --rm --network host --entrypoint sh minio/mc -c \
+            "mc alias set h http://127.0.0.1:8333 any any && mc mb --ignore-existing h/arangox-test"
+          {
+            echo "AWS_ENDPOINT=http://127.0.0.1:8333"
+            echo "AWS_ALLOW_HTTP=true"
+            echo "AWS_REGION=us-east-1"
+            echo "AWS_ACCESS_KEY_ID=any"
+            echo "AWS_SECRET_ACCESS_KEY=anysecret"
+          } >> "$GITHUB_ENV"
+
+      # --- Azurite (Azure Blob emulator) -------------------------------------
+      - name: Start Azurite and create the container
+        if: matrix.scheme == 'azurite'
+        run: |
+          docker run -d --name azurite -p 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite \
+            azurite-blob --blobHost 0.0.0.0
+          until curl -sf http://127.0.0.1:10000/devstoreaccount1 >/dev/null 2>&1; do sleep 1; done
+          az storage container create --name arangox-test \
+            --connection-string "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+          {
+            echo "AZURE_STORAGE_USE_EMULATOR=true"
+            echo "AZURE_ALLOW_HTTP=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Round-trip + resumable upload
+        env:
+          STORAGE_TEST_URI: ${{ matrix.uri }}
+        run: cargo test -p arangodb-storage --test backend_round_trip -- --nocapture
+
+      - name: Throughput baseline
+        env:
+          STORAGE_TEST_URI: ${{ matrix.uri }}
+        run: |
+          echo "### Throughput — ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| uri | MiB | write MiB/s | read MiB/s |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|-----|-------------|------------|" >> "$GITHUB_STEP_SUMMARY"
+          cargo test -p arangodb-storage --test backend_round_trip -- --ignored --nocapture throughput_baseline
+
+  gcs-live:
+    name: gcs (real)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for GCS credentials
+        id: check
+        env:
+          GCS_SERVICE_ACCOUNT_KEY: ${{ secrets.GCS_SERVICE_ACCOUNT_KEY }}
+          GCS_TEST_BUCKET: ${{ secrets.GCS_TEST_BUCKET }}
+        run: |
+          if [ -n "$GCS_SERVICE_ACCOUNT_KEY" ] && [ -n "$GCS_TEST_BUCKET" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "GCS secrets not configured; skipping real-GCS job." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.enabled == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.enabled == 'true'
+      - name: Write the service-account key
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          GCS_SERVICE_ACCOUNT_KEY: ${{ secrets.GCS_SERVICE_ACCOUNT_KEY }}
+        run: printf '%s' "$GCS_SERVICE_ACCOUNT_KEY" > "$RUNNER_TEMP/gcs-key.json"
+      - name: Round-trip + resumable upload
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          GOOGLE_SERVICE_ACCOUNT: ${{ runner.temp }}/gcs-key.json
+          STORAGE_TEST_URI: gs://${{ secrets.GCS_TEST_BUCKET }}
+        run: cargo test -p arangodb-storage --test backend_round_trip -- --nocapture
