@@ -11,11 +11,12 @@ use std::sync::Arc;
 
 use arangodb_client::{ArangoClient, CollectionKind, ImportOptions, ImportResult};
 use arangodb_import::{
-    read_documents, run_import, validate_edge_documents, ArangoBatchSender, Batch, BatchSender,
-    ImportFormat,
+    load_checkpoint, read_documents, run_import, run_import_with_checkpoint,
+    validate_edge_documents, ArangoBatchSender, Batch, BatchSender, CheckpointConfig, ImportFormat,
 };
+use arangodb_storage::{LocalFileSystem, ObjectPath, ObjectStore};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
-use arangodb_tools_core::Result;
+use arangodb_tools_core::{Error, Result};
 
 // ---------------------------------------------------------------------------
 // Live 1M-document import (PRD Milestone 1 exit criterion).
@@ -150,6 +151,133 @@ async fn imports_edges_with_preflight() {
         .drop_collection(collection)
         .await
         .expect("drop edge collection");
+}
+
+// ---------------------------------------------------------------------------
+// Live import resume (Phase 5.2 exit criterion): an interrupted import, when
+// re-run with the same checkpoint, resumes from the committed prefix and the
+// collection ends up with every document exactly once.
+// ---------------------------------------------------------------------------
+
+/// A sender that commits the first `fail_at - 1` batches to the real server and
+/// then fails, simulating a process interruption mid-import.
+struct FailAfter {
+    inner: ArangoBatchSender,
+    sent: AtomicUsize,
+    fail_at: usize,
+}
+
+#[async_trait::async_trait]
+impl BatchSender for FailAfter {
+    async fn send(&self, batch: &Batch) -> Result<ImportResult> {
+        let n = self.sent.fetch_add(1, Ordering::SeqCst) + 1;
+        if n >= self.fail_at {
+            return Err(Error::connection("simulated interruption"));
+        }
+        self.inner.send(batch).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumes_an_interrupted_import_without_duplication() {
+    let Some(client) = live_client() else {
+        eprintln!("ARANGO_ENDPOINT not set; skipping live import resume test");
+        return;
+    };
+    let collection = "arangox_it_import_resume";
+    let total: u64 = 500;
+
+    let _ = client.drop_collection(collection).await;
+    client
+        .ensure_collection(collection, CollectionKind::Document)
+        .await
+        .expect("create collection");
+
+    let path = std::env::temp_dir().join("arangox_it_import_resume.jsonl");
+    write_jsonl(&path, total).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cp_store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new(dir.path()));
+    let checkpoint = CheckpointConfig::new(
+        Arc::clone(&cp_store),
+        ObjectPath::new("import.progress.json"),
+    );
+
+    // 100 docs/batch => 5 batches. A single worker keeps batch ordering
+    // deterministic so the interruption lands on a known contiguous prefix.
+    let batch = BatchConfig {
+        max_bytes: 16 * 1024 * 1024,
+        max_docs: 100,
+    };
+    let concurrency = ConcurrencyConfig {
+        workers: 1,
+        max_in_flight_bytes: 64 * 1024 * 1024,
+        adaptive: false,
+    };
+
+    // Phase 1: fail on the third send, so batches 1-2 commit and the run errors.
+    let file = tokio::fs::File::open(&path).await.expect("open input");
+    let failing: Arc<dyn BatchSender> = Arc::new(FailAfter {
+        inner: ArangoBatchSender::new(client.clone(), ImportOptions::new(collection)),
+        sent: AtomicUsize::new(0),
+        fail_at: 3,
+    });
+    let interrupted = run_import_with_checkpoint(
+        read_documents(ImportFormat::JsonLines, file),
+        batch.clone(),
+        concurrency.clone(),
+        failing,
+        Some(checkpoint.clone()),
+        None,
+    )
+    .await;
+    assert!(
+        interrupted.is_err(),
+        "the interrupted run must surface an error"
+    );
+
+    // The checkpoint recorded a non-empty, partial committed prefix.
+    let saved = load_checkpoint(cp_store.as_ref(), &ObjectPath::new("import.progress.json"))
+        .await
+        .expect("read checkpoint")
+        .expect("checkpoint exists after a partial run");
+    assert!(
+        saved.committed_batches >= 1,
+        "expected some committed batches, got {}",
+        saved.committed_batches
+    );
+    let partial = client.collection_count(collection).await.unwrap();
+    assert!(
+        partial > 0 && partial < total,
+        "expected a partial load, got {partial}"
+    );
+
+    // Phase 2: resume with the same checkpoint and a healthy sender.
+    let file = tokio::fs::File::open(&path).await.expect("re-open input");
+    let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(
+        client.clone(),
+        ImportOptions::new(collection),
+    ));
+    run_import_with_checkpoint(
+        read_documents(ImportFormat::JsonLines, file),
+        batch,
+        concurrency,
+        sender,
+        Some(checkpoint),
+        None,
+    )
+    .await
+    .expect("resumed import succeeds");
+
+    // Every document is present exactly once (unique keys => count == total).
+    assert_eq!(
+        client.collection_count(collection).await.unwrap(),
+        total,
+        "resumed import must reproduce every document exactly once"
+    );
+
+    client.drop_collection(collection).await.unwrap();
+    let _ = tokio::fs::remove_file(&path).await;
 }
 
 /// Writes `docs` JSONL records (`{"_key":"k<i>","v":<i>}`) to `path`.

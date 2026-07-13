@@ -107,9 +107,9 @@ pub async fn run_import<S>(
 ```
 
 **Testing:**
-- [ ] Unit: checkpoint serialization round-trip.
-- [ ] Integration: interrupt import at 50%, resume from checkpoint, verify no duplication with `replace` mode.
-- [ ] Negative: resume with wrong checkpoint key (error).
+- [x] Unit: checkpoint serialization round-trip + contiguous-prefix resume logic (`sender.rs` unit tests).
+- [x] Integration (live): interrupt an import mid-run via a failing sender, resume with the same checkpoint, verify every document lands exactly once (`arangodb-import/tests/integration.rs::resumes_an_interrupted_import_without_duplication`).
+- [x] Negative: resume against a mismatched checkpoint is refused (restore side, `resume_and_multidb.rs`).
 
 **Exit criteria:**
 - Import 1M-document file, interrupt at 500K, resume from checkpoint, final count = 1M (no duplicates).
@@ -177,7 +177,7 @@ pub async fn restore_with_checkpoint(
 
 **Testing:**
 - [x] Unit: split logic with small thresholds for jsonl, json, and csv (parts standalone-valid; concatenation reproduces every record).
-- [ ] Integration: export with 10 MB part size against a live server. *(Covered by unit tests over the streaming path; live case deferred.)*
+- [x] Integration (live): export with a small part size against a live server; verify multiple parts and that concatenation reproduces every record (`arangodb-export/tests/round_trip.rs::split_export_writes_multiple_parts_reproducing_every_record`).
 
 **Exit criteria:**
 - Export a collection in size-bounded parts; manifest lists parts; concatenating parts reproduces every record. ✅ (cloud multipart benchmark deferred to Phase 7)
@@ -585,7 +585,7 @@ storage.put_stream(&path, stream).await?;
 - [x] Performance baseline: `throughput_baseline` (write/read MiB/s) run per backend and recorded in the job summary.
 - [x] Nightly job (`.github/workflows/nightly.yml`): MinIO, SeaweedFS, Azurite live; real GCS gated on `secrets.GCS_*`.
 
-> Note: dump/restore/import/export share the *same* `ObjectStore` layer this suite exercises, so backend coverage of the low-level contract covers them; end-to-end per-backend dump/restore against a live DB remains a possible future addition.
+> Note: a live end-to-end dump→restore through the S3/MinIO backend runs in the PR `test` job (`arangodb-restore/tests/object_store_round_trip.rs`), on top of the low-level `ObjectStore` contract the URI-driven suite exercises per backend. Extending that end-to-end cycle to GCS/Azure nightly is a possible future addition.
 
 **Exit criteria:**
 - [x] CI matrix passes for all backends and critical operations.
@@ -600,7 +600,7 @@ storage.put_stream(&path, stream).await?;
   - [x] Architecture (how `StorageUri` detects and routes to backends).
   - [x] Setup per backend with real examples.
   - [x] URI reference and where each location kind is accepted.
-  - [ ] Full troubleshooting + per-provider performance tuning (follow-up).
+  - [x] Troubleshooting table (common errors per backend) + per-provider performance tuning.
 
 **Exit criteria:**
 - Docs complete; examples tested (at least locally).
@@ -636,12 +636,12 @@ storage.put_stream(&path, stream).await?;
 | Doc | Updates |
 |-----|---------|
 | `docs/IMPLEMENTATION_PLAN.md` | Mark phases complete; link to remaining work |
-| `docs/resume.md` | NEW: checkpoint semantics, at-least-once guarantees, duplicate-mode interaction |
-| `docs/dump-format.md` | Add: multi-database structure, split artifacts, all-databases manifest shape |
-| `docs/rdf-model.md` | NEW: graph model, literal policies, key generation |
-| `docs/backends.md` | NEW: per-backend setup, feature matrix, performance notes |
-| `docs/cli-reference.md` | NEW or UPDATE: all Phase 5–7 CLI flags |
-| `README.md` | Update status; note Phase 5–7 in progress |
+| `docs/resume.md` | ✅ DONE: checkpoint semantics, at-least-once guarantees, resumable uploads |
+| `docs/dump-format.md` | ✅ DONE: layout, multi-database structure, split artifacts, manifest schema |
+| `docs/rdf-model.md` | ✅ DONE: graph model, literal policies, key generation |
+| `docs/backends.md` | ✅ DONE: per-backend setup, troubleshooting, performance tuning |
+| `docs/cli-reference.md` | ✅ DONE: all Phase 5–7 CLI flags |
+| `README.md` | ✅ DONE: status + Documentation index |
 
 ### Known Constraints & Risks
 

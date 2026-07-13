@@ -7,6 +7,12 @@
 //! and `/_api/cursor`; further endpoint families (database, dump, replication)
 //! are added in later phases per `docs/IMPLEMENTATION_PLAN.md`.
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod client;
 pub mod collection;
 pub mod cursor;

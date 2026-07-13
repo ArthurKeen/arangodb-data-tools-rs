@@ -11,6 +11,12 @@
 //! Scope: single-server, JSONL data. The parallel `/_api/dump/*` protocol and
 //! per-shard resume are deferred (see `docs/IMPLEMENTATION_PLAN.md`).
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 

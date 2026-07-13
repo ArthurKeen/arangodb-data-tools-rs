@@ -18,6 +18,12 @@
 //! - [`sender`]: [`run_import`] drives batches through `N` concurrent senders
 //!   under a global in-flight-byte cap.
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod adaptive;
 pub mod batch;
 pub mod edge;

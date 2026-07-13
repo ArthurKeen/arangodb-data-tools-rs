@@ -6,6 +6,12 @@
 //! backend and [`ObjectStoreBackend`] adapts the `object_store` crate for
 //! S3-compatible storage (GCS/Azure reuse the same adapter in later phases).
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod compression;
 pub mod local;
 pub mod object_store_backend;

@@ -22,6 +22,12 @@
 //! collection ordering (`_analyzers` first / `_users` last), and vector-index
 //! ordering are deferred (see `docs/IMPLEMENTATION_PLAN.md`).
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 use std::sync::Arc;
 use std::time::Instant;
 
