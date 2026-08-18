@@ -31,3 +31,7 @@ CLAUDE.md
 
 # Generated docs
 *.pdf
+.no-drift-gate
+.cursor/.shared-memory-sessions/
+.cursor/hooks.json.pre-update.*
+.cursor/hooks/*.pre-update.*
