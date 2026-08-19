@@ -232,7 +232,7 @@ Responsibilities:
 
 Responsibilities:
 
-- Provide binaries such as `arangox-import`, `arangox-export`, `arangox-dump`, `arangox-restore`, and `arangox-rdf`.
+- Provide a single `arangox` binary with `import`, `export`, `dump`, `restore`, and `rdf` subcommands, so connection/auth/output options are shared and documented once.
 - Map CLI options to library config structs.
 - Provide progress output and machine-readable logs.
 - Support config files and environment variables.
@@ -398,7 +398,7 @@ Note that in ArangoDB's format gzip compression and encryption are mutually excl
 - Retries must distinguish retryable transport errors (connect/read/write failures, gateway timeouts, cluster timeouts, HTTP 429/503) from non-retryable server errors, and use bounded backoff.
 - Object uploads should be resumable where backend support exists.
 - Both dump and restore should checkpoint by database, collection, shard, and phase (symmetric resumability; see §8.4 and §8.5).
-- Import should checkpoint input offsets only for seekable/range-readable sources.
+- Import should checkpoint deterministic batch indices, which works for any source (including non-seekable stdin and streams) because identical input and batching config yield an identical batch sequence. A contiguous committed-batch high-water mark is recorded so concurrent out-of-order sends can never advance the checkpoint past an uncommitted batch. Byte-offset fast-forward for seekable/range-readable sources is an optional optimization to avoid re-reading the skipped prefix, not the checkpoint mechanism.
 - Error messages should include collection, object path, byte range, batch number, and server response where applicable.
 - Prefer recoverable, structured errors over process-aborting fatal exits. (The reference tools call `FATAL_ERROR_EXIT()` in many paths, including parallel dump errors, which prevents cleanup and resume.)
 - Destructive operations must require explicit configuration.
@@ -410,7 +410,7 @@ Note that in ArangoDB's format gzip compression and encryption are mutually excl
 Initial performance targets should be expressed as relative goals until benchmarking is available.
 
 - Import throughput should at least match `arangoimport` for JSONL on a local network in MVP, and the design should aim to saturate either the server or the network/storage link rather than the client. (The C++ baseline is itself bottlenecked by blocking senders and parser-thread pacing, so "within 50%" is a floor, not a goal.)
-- This target is measured, not assumed: the test suite includes a benchmark harness that runs official `arangoimport` and `arangox-import` against the same fixture and the same Docker server and reports relative throughput (see §16.2). A relative performance requirement without a comparison harness is unfalsifiable.
+- This target is measured, not assumed: the test suite includes a benchmark harness that runs official `arangoimport` and `arangox import` against the same fixture and the same Docker server and reports relative throughput (see §16.2). A relative performance requirement without a comparison harness is unfalsifiable.
 - Export throughput should primarily be limited by ArangoDB cursor performance or storage write bandwidth, not by client-side buffering.
 - Dump and restore should support concurrent collection and shard processing.
 - Memory usage should remain bounded by configured batch sizes, in-flight-byte limits, and worker counts.
@@ -458,15 +458,19 @@ The pipeline must have an explicit, documented backpressure model. This is the s
 --threads
 --batch-size
 --storage-config
---log-format text|json
+--output text|json
 --progress
 --dry-run
 ```
 
+`--output` is global rather than per-subcommand: it selects both the result
+rendering on stdout and whether newline-delimited progress events are emitted on
+stderr, so it governs presentation as a whole and not only log formatting.
+
 ### 13.2 Import CLI
 
 ```text
-arangox-import \
+arangox import \
   --endpoint http://localhost:8529 \
   --database mydb \
   --collection users \
@@ -477,7 +481,7 @@ arangox-import \
 ### 13.3 Dump CLI
 
 ```text
-arangox-dump \
+arangox dump \
   --endpoint http://localhost:8529 \
   --database mydb \
   --output s3://bucket/backups/mydb/2026-05-26
@@ -486,7 +490,7 @@ arangox-dump \
 ### 13.4 Restore CLI
 
 ```text
-arangox-restore \
+arangox restore \
   --endpoint http://localhost:8529 \
   --input s3://bucket/backups/mydb/2026-05-26 \
   --create-database \
@@ -496,7 +500,7 @@ arangox-restore \
 ### 13.5 RDF CLI
 
 ```text
-arangox-rdf import \
+arangox rdf import \
   --endpoint http://localhost:8529 \
   --database knowledge \
   --input gs://datasets/example.ttl \
@@ -566,7 +570,7 @@ ImportJob::builder()
 - Restore selected collections.
 - Validate indexes and views where supported.
 - Negative compatibility fixtures: an Enterprise-encrypted dump (`ENCRYPTION` marker) and a VelocyPack dump must be refused loudly — assert the error messages and that no partial server-state mutation occurs (§9.4, §19).
-- Throughput benchmark harness: official `arangoimport` vs `arangox-import` on a shared JSONL fixture against the same server (§11.1).
+- Throughput benchmark harness: official `arangoimport` vs `arangox import` on a shared JSONL fixture against the same server (§11.1).
 
 ### 16.3 Storage Tests
 
@@ -689,7 +693,7 @@ Deliverables:
 
 - All-databases dump.
 - Restore continuation.
-- Import resume from input-offset checkpoints for seekable/range-readable sources (§10), with documented at-least-once semantics (§8.2).
+- Import resume from batch-index checkpoints for any source (§10), with documented at-least-once semantics (§8.2).
 - Adaptive batching and rate limiting driven by server feedback (§11.3).
 - Restore topology overrides: `numberOfShards`/`replicationFactor` overrides and cluster-only property stripping (§8.5).
 - Collection/view filters.
