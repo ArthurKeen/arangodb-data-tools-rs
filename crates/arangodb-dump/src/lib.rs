@@ -8,8 +8,11 @@
 //! `dump.manifest.json`, so restore never guesses filenames (PRD §8.4). The
 //! batch is kept alive with TTL extensions and always released.
 //!
-//! Scope: single-server, JSONL data. The parallel `/_api/dump/*` protocol and
-//! per-shard resume are deferred (see `docs/IMPLEMENTATION_PLAN.md`).
+//! Scope: single-server, JSONL data. A dump refuses to run against a cluster
+//! deployment (the server role is checked before any work starts), so the
+//! untested cluster path can never silently produce an incomplete dump. The
+//! parallel `/_api/dump/*` protocol and per-shard resume are deferred (see
+//! `docs/IMPLEMENTATION_PLAN.md`).
 
 /// The crate README, compiled as doctests so its examples stay in sync with the
 /// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
@@ -154,6 +157,12 @@ pub async fn run_dump_with_progress(
         started: Instant::now(),
         collections: 0,
     };
+
+    // Refuse a cluster before creating any batch or writing any artifact
+    // (PRD §8.4): the single-server replication path would otherwise produce a
+    // dump whose cross-shard completeness was never verified.
+    preflight_topology(client, progress.as_deref()).await?;
+
     if !options.all_databases {
         let batch = client
             .replication_batch_create(options.batch_ttl_secs)
@@ -201,6 +210,50 @@ pub async fn run_dump_with_progress(
             )
             .await?;
         Ok(manifest)
+    }
+}
+
+/// Fails the dump if the endpoint is part of a cluster deployment.
+///
+/// Cluster-aware dump (`/_api/replication/clusterInventory`, shard-level
+/// parallelism across DB-Servers) is post-MVP. Running the single-server
+/// replication path against a coordinator would produce a dump whose
+/// completeness across shards is unverified, so PRD §8.4 requires detecting
+/// the deployment and failing clearly instead.
+///
+/// A probe that cannot be completed (an old server without the endpoint,
+/// insufficient permissions, a transient failure) is **inconclusive, not
+/// safe**: it is reported as a warning and the dump proceeds, because
+/// refusing every dump whose role could not be read would break single-server
+/// users for a diagnostic call. The warning is emitted through the progress
+/// sink as well as the log so it reaches machine-readable consumers.
+async fn preflight_topology(
+    client: &ArangoClient,
+    progress: Option<&dyn ProgressSink>,
+) -> Result<()> {
+    match client.server_role().await {
+        Ok(role) if role.is_cluster() => Err(Error::config(format!(
+            "refusing to dump from a cluster deployment (server role: {role}). Cluster-aware \
+             dump is not implemented yet, and the single-server path would produce a dump whose \
+             completeness across shards is unverified. Point --endpoint at a single server, or \
+             use ArangoDB's own arangodump for cluster deployments."
+        ))),
+        Ok(role) => {
+            tracing::debug!(%role, "server role checked; proceeding with single-server dump");
+            Ok(())
+        }
+        Err(err) => {
+            let message = format!(
+                "could not determine the server's deployment role ({err}); proceeding with the \
+                 single-server dump path. If this endpoint is a cluster coordinator, the dump may \
+                 be incomplete across shards."
+            );
+            tracing::warn!(error = %err, "server role probe failed; assuming single server");
+            if let Some(sink) = progress {
+                sink.emit(&ProgressEvent::Warning { message });
+            }
+            Ok(())
+        }
     }
 }
 

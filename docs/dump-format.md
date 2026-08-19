@@ -130,3 +130,48 @@ Each artifact:
 - Scope is single-server, JSONL data. The parallel `/_api/dump/*` protocol,
   per-shard artifacts, VelocyPack payloads, and Enterprise-encrypted dumps are
   not produced (encrypted dumps are refused with a clear error).
+- **Cluster deployments are refused, not attempted.** Before creating a
+  replication batch or writing any artifact, `arangox dump` checks
+  `/_admin/server/role`. A `COORDINATOR`, `DBSERVER`/`PRIMARY`, or `AGENT`
+  response fails the dump with an error naming the detected role, because
+  cluster-aware dump is post-MVP and the single-server path cannot guarantee
+  completeness across shards. If the role cannot be read (an old server, a
+  permissions or transient failure), the dump proceeds and emits a warning —
+  an inconclusive probe is reported, never silently treated as a single server.
+
+## Consistency model
+
+**Is my dump consistent while writes continue? Yes, per collection, on a single
+server.**
+
+The dump creates a replication batch — a pinned snapshot — *before* reading the
+inventory, and passes that batch id to both the inventory call and every
+subsequent data read. So the collection list, each collection's structure, and
+all of its documents are read from one snapshot taken at batch-creation time.
+Writes that land after that point are not included, and never appear partially:
+a document is either fully in the dump or absent. The batch's TTL is extended
+before each collection so the snapshot survives a long transfer, and it is
+released on completion, error, and cancellation alike.
+
+What is guaranteed:
+
+- **Per-collection point-in-time consistency**, at the instant the replication
+  batch was created.
+- **Cross-collection consistency** for a single-database dump: all collections
+  share the one batch, so a dump cannot capture a write to collection B that
+  depends on a write to A it missed.
+- **Referential integrity between edge and vertex collections**, as a
+  consequence of the above.
+
+What is *not* guaranteed:
+
+- **Across databases.** `--all-databases` creates one batch per database, in
+  sequence, so each database is internally consistent but different databases
+  are snapshotted at different times. Two databases are not mutually
+  consistent.
+- **Across shards on a cluster.** Not applicable today — cluster dumps are
+  refused (above). When cluster support lands, cross-shard guarantees will be
+  weaker than the single-server case and will be documented here before the
+  code ships.
+- **Anything after the snapshot.** A dump is not a continuous backup; it has no
+  tail of changes and no point-in-time recovery beyond the snapshot instant.

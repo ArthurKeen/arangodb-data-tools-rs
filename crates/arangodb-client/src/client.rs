@@ -11,6 +11,7 @@ use crate::collection::{CollectionCount, CollectionInfo, CollectionKind};
 use crate::cursor::{CursorBatch, CursorRequest};
 use crate::import::{ImportOptions, ImportResult};
 use crate::replication::{DumpChunk, Inventory};
+use crate::topology::{RoleResponse, ServerRole};
 use crate::version::VersionInfo;
 
 /// An HTTP client for a single ArangoDB endpoint and database.
@@ -108,6 +109,47 @@ impl ArangoClient {
     pub async fn version(&self) -> Result<VersionInfo> {
         let body = self.execute(Method::GET, "/_api/version", None).await?;
         Ok(serde_json::from_slice::<VersionInfo>(&body)?)
+    }
+
+    /// Reports the deployment role of the server behind this endpoint, via
+    /// `/_admin/server/role`.
+    ///
+    /// Used to detect a cluster deployment before starting work whose MVP code
+    /// path is single-server only (PRD §8.4). The request is **not**
+    /// database-scoped, so it works before the target database exists.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails after retries or the response
+    /// cannot be parsed. Callers should treat a failed probe as inconclusive
+    /// rather than as proof of a single server.
+    pub async fn server_role(&self) -> Result<ServerRole> {
+        let url = self
+            .base
+            .join("/_admin/server/role")
+            .map_err(|err| Error::config(format!("invalid server role URL: {err}")))?;
+
+        let payload = retry(&self.retry, || {
+            let url = url.clone();
+            async move {
+                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let response = request.send().await.map_err(map_reqwest_error)?;
+                let status = response.status();
+                let body = response.bytes().await.map_err(map_reqwest_error)?;
+                if status.is_success() {
+                    Ok(body.to_vec())
+                } else {
+                    let message = match arango_error_message(body.as_ref()) {
+                        Some(message) => message,
+                        None => status.to_string(),
+                    };
+                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                }
+            }
+        })
+        .await?;
+
+        let parsed: RoleResponse = serde_json::from_slice(&payload)?;
+        Ok(ServerRole::parse(&parsed.role))
     }
 
     /// Imports a newline-delimited JSON (JSONL) batch via `POST /_api/import`.

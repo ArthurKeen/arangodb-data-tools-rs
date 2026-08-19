@@ -27,6 +27,7 @@
 /dump
 /scratch
 .prd-drift-queue/
+.pattern-capture-queue/
 CLAUDE.md
 
 # Generated docs

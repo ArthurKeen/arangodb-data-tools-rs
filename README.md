@@ -243,6 +243,7 @@ Two integration paths are supported:
 - Targets ArangoDB **3.12** and current stable.
 - The project manifest format is **canonical**; compatibility with official `arangodump`/`arangorestore` is limited to a tested subset (single-server, JSONL, no Enterprise encryption) and is best-effort elsewhere.
 - VelocyPack data and Enterprise-encrypted dumps are **not** supported yet; the tools will refuse them with a clear error rather than mishandle them.
+- **Single-server only for dump.** `arangox dump` checks the server's deployment role first and refuses to run against a cluster coordinator, DB-Server, or agent, naming the role in the error — cluster-aware dump is post-MVP, and the single-server path cannot guarantee completeness across shards. Use ArangoDB's own `arangodump` for clusters. See [`docs/dump-format.md`](docs/dump-format.md) for the dump consistency model (what is and is not guaranteed while writes continue).
 
 Compatibility limits will be documented as they are validated by tests.
 
