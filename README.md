@@ -5,6 +5,57 @@ A Rust library and CLI toolkit for ArangoDB bulk data workflows: **import**, **e
 > **Status: pre-alpha / under active development.**
 > This project is a clean-room reimplementation modeled on the behavior of ArangoDB's client tools (`arangoimport`, `arangoexport`, `arangodump`, `arangorestore`). It does **not** embed or link ArangoDB's C++ client code. Interoperability with the official tools is a scoped, best-effort goal and is not yet guaranteed. APIs, formats, and CLI options will change without notice until the first tagged release.
 
+## Installation
+
+### CLI
+
+Install the `arangox` binary from crates.io (requires a stable Rust toolchain):
+
+```bash
+cargo install arangodb-tools-cli    # installs the `arangox` binary
+```
+
+Or build it from source:
+
+```bash
+git clone https://github.com/ArthurKeen/arangodb-data-tools-rs
+cargo build --release -p arangodb-tools-cli   # ./target/release/arangox
+```
+
+### Library
+
+Add just the crates you need to your `Cargo.toml` (they run on `tokio`):
+
+```bash
+cargo add arangodb-import      # streaming bulk import
+cargo add arangodb-export      # export via AQL cursors
+cargo add arangodb-dump arangodb-restore   # manifest-driven dump/restore
+cargo add arangodb-rdf         # RDF bulk load (N-Triples/N-Quads/Turtle)
+cargo add arangodb-storage     # storage backends (local / S3 / GCS / Azure)
+```
+
+## Quickstart
+
+```bash
+# 1. Install the CLI
+cargo install arangodb-tools-cli
+
+# 2. Keep secrets out of argv: the password is read from an env var by name
+export ARANGO_PASSWORD='...'
+
+# 3. Import a JSONL file, creating the collection if it does not exist
+arangox import \
+  --endpoint http://localhost:8529 --database mydb \
+  --username root --password-env ARANGO_PASSWORD \
+  --collection people --input people.jsonl --create-collection
+
+# 4. Back up a database and restore it into a new one
+arangox dump    --database mydb      --output ./dump-mydb
+arangox restore --database mydb-copy --input  ./dump-mydb --create-database
+```
+
+Using it as a library instead? Each crate's README (and its [docs.rs](https://docs.rs) page) has a short Rust example; see [Documentation](#documentation) below. Full flag details are in [`docs/cli-reference.md`](docs/cli-reference.md).
+
 ## Why
 
 The official ArangoDB client tools are capable but assume local-filesystem output, use blocking I/O, and offer limited resumability and observability. This project aims to provide:
@@ -180,7 +231,8 @@ Two integration paths are supported:
 ## Documentation
 
 - [`docs/cli-reference.md`](docs/cli-reference.md) — every subcommand and flag.
-- [`docs/backends.md`](docs/backends.md) — storage schemes and credentials.
+- [`docs/backends.md`](docs/backends.md) — storage schemes, credentials, troubleshooting, tuning.
+- [`docs/dump-format.md`](docs/dump-format.md) — dump/export layout and manifest schema.
 - [`docs/resume.md`](docs/resume.md) — checkpoints and restart-resumable uploads.
 - [`docs/rdf-model.md`](docs/rdf-model.md) — the RDF-to-graph mapping (PGT/RPT).
 - [`docs/benchmarks.md`](docs/benchmarks.md) — throughput baselines.
@@ -191,6 +243,7 @@ Two integration paths are supported:
 - Targets ArangoDB **3.12** and current stable.
 - The project manifest format is **canonical**; compatibility with official `arangodump`/`arangorestore` is limited to a tested subset (single-server, JSONL, no Enterprise encryption) and is best-effort elsewhere.
 - VelocyPack data and Enterprise-encrypted dumps are **not** supported yet; the tools will refuse them with a clear error rather than mishandle them.
+- **Single-server only for dump.** `arangox dump` checks the server's deployment role first and refuses to run against a cluster coordinator, DB-Server, or agent, naming the role in the error — cluster-aware dump is post-MVP, and the single-server path cannot guarantee completeness across shards. Use ArangoDB's own `arangodump` for clusters. See [`docs/dump-format.md`](docs/dump-format.md) for the dump consistency model (what is and is not guaranteed while writes continue).
 
 Compatibility limits will be documented as they are validated by tests.
 

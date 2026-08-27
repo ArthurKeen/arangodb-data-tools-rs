@@ -132,3 +132,46 @@ SeaweedFS. See [`docs/resume.md`](resume.md) for the full resumability story.
 - Cross-backend behavior is covered nightly (`.github/workflows/nightly.yml`)
   against MinIO, SeaweedFS, and Azurite (and real GCS when secrets are set),
   including the resumable-upload round trip and a throughput baseline.
+
+## Troubleshooting
+
+Storage errors surface as `storage error: …` (or `configuration error: …` for a
+malformed URI). Common cases:
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `configuration error: unsupported storage scheme '…'` | URI scheme not recognized | Use one of `file`, `s3`, `seaweed+s3`, `gs`, `az`. |
+| `configuration error: … missing a bucket/container` | URI has no bucket, e.g. `s3:///key` | Include the bucket: `s3://bucket/key`. |
+| `configuration error: file:// is a local path, not an object store` | `file://` used where a bucket is required | Use a real object-store URI, or a plain path for local. |
+| S3: `dispatch error` / connection refused | `AWS_ENDPOINT` wrong, or MinIO/gateway down | Verify the endpoint and that the server is up; set `AWS_ALLOW_HTTP=true` for plain-HTTP endpoints. |
+| S3: `403 Forbidden` / `SignatureDoesNotMatch` | Bad `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or `AWS_REGION` mismatch | Re-check credentials and region; some gateways need `AWS_REGION=us-east-1`. |
+| S3/SeaweedFS: `NoSuchBucket` | Bucket not created | Create it first (`mc mb`, `aws s3 mb`, …); the tools do not auto-create buckets. |
+| GCS: `credential`/`could not find default credentials` | No `GOOGLE_*` env set | Set `GOOGLE_SERVICE_ACCOUNT` (keyfile path) or `GOOGLE_APPLICATION_CREDENTIALS`. |
+| Azure: `401`/auth errors | Missing account key or SAS | Set `AZURE_STORAGE_ACCOUNT_NAME` + `AZURE_STORAGE_ACCOUNT_KEY`, or a SAS token; for Azurite set `AZURE_STORAGE_USE_EMULATOR=true`. |
+| Azurite: connection refused | Emulator not running / wrong port | Start Azurite on `:10000`, or set `AZURITE_BLOB_STORAGE_URL`. |
+| `object path escapes storage prefix` | Key contains `.`/`..` segments | Use plain relative keys without traversal segments. |
+
+## Performance tuning
+
+Throughput is dominated by round-trip latency to the backend and by how much
+work is in flight, so the same knobs apply across providers:
+
+- **Batch size** (`--batch-size-bytes`, `--max-docs` for `import`/`rdf`; and the
+  cursor `--batch-size` for `export`): larger batches amortize per-request
+  overhead. 8–16 MiB import batches are a good default against cloud latency.
+- **Concurrency** (`--threads`, `--max-in-flight-bytes`): more concurrent
+  requests hide latency to remote object stores; raise in-flight bytes when you
+  have bandwidth and memory. The adaptive governor backs off automatically under
+  server `429/503`, so you can start high and let it settle (`--no-adaptive`
+  disables it).
+- **Compression** (`--compression gzip|zstd` for dump/export): trades CPU for
+  fewer bytes on the wire — usually a win to cloud storage; `zstd` gives the
+  best ratio/speed balance.
+- **Split large exports** (`--split-bytes`): bounds the size of any single
+  object and lets an interrupted transfer resume per part rather than per whole
+  object.
+- **Co-locate**: run the tools in the same region as the bucket/container;
+  cross-region latency is the biggest throughput killer.
+
+The nightly workflow records a `throughput_baseline` (write/read MiB/s) per
+backend in its job summary, which is a useful reference point when tuning.

@@ -12,6 +12,12 @@
 //! cursor batch size rather than the collection size. See
 //! `docs/IMPLEMENTATION_PLAN.md` (section 4, phase 3).
 
+/// The crate README, compiled as doctests so its examples stay in sync with the
+/// API. `#[cfg(doctest)]` keeps this helper out of the rendered documentation.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod encode;
 pub mod format;
 pub mod split;

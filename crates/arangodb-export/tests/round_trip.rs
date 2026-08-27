@@ -7,7 +7,9 @@
 use std::collections::BTreeSet;
 
 use arangodb_client::{ArangoClient, CollectionKind, ImportOptions};
-use arangodb_export::{collection_query, run_export, ExportFormat};
+use arangodb_export::{
+    collection_query, document_stream, run_export, run_split_export, ExportFormat, ManifestMeta,
+};
 use arangodb_import::{read_documents, run_import, ArangoBatchSender, BatchSender, ImportFormat};
 use arangodb_storage::{Compression, LocalFileSystem, ObjectPath, ObjectStore};
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
@@ -106,6 +108,79 @@ async fn export_jsonl_reproduces_collection() {
         keys,
         ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
     );
+
+    client.drop_collection(collection).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_export_writes_multiple_parts_reproducing_every_record() {
+    let Some(client) = live_client() else {
+        eprintln!("ARANGO_ENDPOINT not set; skipping split-export test");
+        return;
+    };
+    let collection = "arangox_it_split";
+    let total: usize = 50;
+
+    let _ = client.drop_collection(collection).await;
+    client
+        .ensure_collection(collection, CollectionKind::Document)
+        .await
+        .unwrap();
+
+    // Seed `total` documents with unique keys.
+    let mut seed = String::new();
+    for i in 0..total {
+        seed.push_str(&format!("{{\"_key\":\"k{i}\",\"v\":{i}}}\n"));
+    }
+    client
+        .import_documents(
+            &ImportOptions::new(collection),
+            bytes::Bytes::from(seed.into_bytes()),
+        )
+        .await
+        .unwrap();
+
+    // Split into small parts (~200 uncompressed bytes each) to force several
+    // parts for 50 short documents.
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFileSystem::new(dir.path());
+    let manifest = run_split_export(
+        document_stream(client.clone(), collection_query(collection, 25)),
+        ExportFormat::JsonLines,
+        None,
+        Compression::None,
+        &store,
+        "export",
+        200,
+        ManifestMeta {
+            database: "_system".to_string(),
+            tool_version: "test".to_string(),
+            created_at: "2026-07-06T00:00:00Z".to_string(),
+            source: Some(collection.to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        manifest.artifacts.len() > 1,
+        "expected multiple parts, got {}",
+        manifest.artifacts.len()
+    );
+
+    // Reading every part in order reproduces exactly the seeded records.
+    let mut keys = BTreeSet::new();
+    for artifact in &manifest.artifacts {
+        let bytes = read_object(&store, &ObjectPath::new(artifact.path.clone())).await;
+        for line in String::from_utf8(bytes).unwrap().lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let doc: serde_json::Value = serde_json::from_str(line).unwrap();
+            keys.insert(doc["_key"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(keys.len(), total, "all records reproduced across parts");
 
     client.drop_collection(collection).await.unwrap();
 }

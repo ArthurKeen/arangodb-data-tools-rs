@@ -2,8 +2,8 @@
 //!
 //! The manifest is the source of truth for what a dump/export contains: every
 //! artifact is enumerated with its format, compression, size, and checksum, so
-//! restore never has to guess filenames. See `docs/dump-format.md` (to be
-//! written) for the on-disk/object specification.
+//! restore never has to guess filenames. See `docs/dump-format.md` for the
+//! on-disk/object specification.
 
 use serde::{Deserialize, Serialize};
 

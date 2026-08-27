@@ -26,3 +26,10 @@ async-stream = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 sha2 = { workspace = true }
 regex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The cluster-refusal test stands up a minimal in-process HTTP responder for
+# /_admin/server/role, so no live server or mocking crate is needed.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tempfile = "3"
