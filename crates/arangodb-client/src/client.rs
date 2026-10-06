@@ -1,5 +1,6 @@
 //! The [`ArangoClient`] and its builder.
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use arangodb_tools_core::config::{AuthConfig, ConnectionConfig, TlsConfig};
@@ -7,6 +8,7 @@ use arangodb_tools_core::{retry, Error, ErrorContext, Result, RetryPolicy, Secre
 use bytes::Bytes;
 use reqwest::{Method, RequestBuilder};
 
+use crate::auth;
 use crate::collection::{CollectionCount, CollectionInfo, CollectionKind};
 use crate::cursor::{CursorBatch, CursorRequest};
 use crate::import::{ImportOptions, ImportResult};
@@ -24,6 +26,17 @@ pub struct ArangoClient {
     config: ConnectionConfig,
     retry: RetryPolicy,
     base: reqwest::Url,
+    /// Cached bearer token for the JWT auth modes, shared across clones so a
+    /// `with_database` sibling reuses the same login rather than re-minting.
+    token: Arc<RwLock<Option<CachedToken>>>,
+}
+
+/// A bearer token together with the expiry this client believes it has.
+#[derive(Debug, Clone)]
+struct CachedToken {
+    value: String,
+    /// `None` means the token carried no readable `exp`.
+    expires_at: Option<u64>,
 }
 
 impl ArangoClient {
@@ -51,6 +64,7 @@ impl ArangoClient {
             config: cfg,
             retry: self.retry.clone(),
             base: self.base.clone(),
+            token: Arc::clone(&self.token),
         }
     }
 
@@ -66,7 +80,7 @@ impl ArangoClient {
         let payload = retry(&self.retry, || {
             let url = url.clone();
             async move {
-                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let request = self.apply_auth(self.http.request(Method::GET, url)).await?;
                 let response = request.send().await.map_err(map_reqwest_error)?;
                 let status = response.status();
                 let body = response.bytes().await.map_err(map_reqwest_error)?;
@@ -131,7 +145,7 @@ impl ArangoClient {
         let payload = retry(&self.retry, || {
             let url = url.clone();
             async move {
-                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let request = self.apply_auth(self.http.request(Method::GET, url)).await?;
                 let response = request.send().await.map_err(map_reqwest_error)?;
                 let status = response.status();
                 let body = response.bytes().await.map_err(map_reqwest_error)?;
@@ -347,7 +361,7 @@ impl ArangoClient {
         retry(&self.retry, || {
             let url = url.clone();
             async move {
-                let request = self.apply_auth(self.http.request(Method::GET, url));
+                let request = self.apply_auth(self.http.request(Method::GET, url)).await?;
                 let response = request.send().await.map_err(map_reqwest_error)?;
                 let status = response.status();
                 let last_included_tick = header_u64(&response, "x-arango-replication-lastincluded");
@@ -519,15 +533,158 @@ impl ArangoClient {
             .map_err(|err| Error::config(format!("invalid request URL '{scoped}': {err}")))
     }
 
-    /// Applies the configured authentication to a request.
-    fn apply_auth(&self, request: RequestBuilder) -> RequestBuilder {
-        match &self.config.auth {
+    /// Applies the configured authentication to a request, obtaining or
+    /// refreshing a JWT first when the auth mode calls for one.
+    ///
+    /// # Errors
+    /// Returns an error if a JWT could not be minted or a login failed.
+    async fn apply_auth(&self, request: RequestBuilder) -> Result<RequestBuilder> {
+        Ok(match &self.config.auth {
             AuthConfig::None => request,
             AuthConfig::Basic { username, password } => {
                 request.basic_auth(username, Some(password.expose()))
             }
             AuthConfig::Bearer { token } => request.bearer_auth(token.expose()),
+            AuthConfig::JwtSecret { .. } | AuthConfig::JwtLogin { .. } => {
+                request.bearer_auth(self.bearer_token().await?)
+            }
+        })
+    }
+
+    /// Turns a bare 401 into an explanation of what is actually wrong.
+    ///
+    /// A rejected JWT is the single most confusing failure in ArangoDB tooling:
+    /// the server answers "not authorized" identically whether the secret is
+    /// wrong, the claims are malformed, or the user lacks rights. Having just
+    /// refreshed and been refused again, the client knows the credential itself
+    /// is at fault and says so, naming the mode in use.
+    fn explain_auth_failure(&self, error: Error) -> Error {
+        if !is_unauthorized(&error) {
+            return error;
         }
+        let hint = match &self.config.auth {
+            AuthConfig::JwtSecret { .. } => {
+                "the JWT secret was rejected. It must match the server's \
+                 --server.jwt-secret-keyfile byte for byte — a trailing newline in the \
+                 secret file is the usual cause (this client already trims one). Confirm \
+                 with: curl -H \"Authorization: bearer <token>\" <endpoint>/_api/version"
+            }
+            AuthConfig::JwtLogin { .. } => {
+                "the login at POST /_open/auth succeeded earlier but the token was then \
+                 refused. The user may lack rights on this database, or the server's JWT \
+                 secret may have been rotated mid-run"
+            }
+            _ => return error,
+        };
+        // Use the inner message, not Display, which already prefixes "HTTP 401:".
+        let detail = match &error {
+            Error::Http { message, .. } => message.clone(),
+            other => other.to_string(),
+        };
+        Error::http(401, format!("{detail}. Hint: {hint}"), ErrorContext::new())
+    }
+
+    /// Whether this client can obtain a fresh token by itself. A caller-supplied
+    /// `Bearer` token cannot be re-obtained, so a 401 under that mode is final.
+    fn can_refresh_token(&self) -> bool {
+        matches!(
+            self.config.auth,
+            AuthConfig::JwtSecret { .. } | AuthConfig::JwtLogin { .. }
+        )
+    }
+
+    /// Returns a usable bearer token, minting or logging in when the cache is
+    /// empty or the cached token is at or near its expiry.
+    async fn bearer_token(&self) -> Result<String> {
+        if let Some(cached) = self.cached_token() {
+            if !auth::is_expiring(cached.expires_at) {
+                return Ok(cached.value);
+            }
+        }
+
+        let token = match &self.config.auth {
+            AuthConfig::JwtSecret { secret } => auth::mint_superuser_jwt(secret.expose())?,
+            AuthConfig::JwtLogin { username, password } => {
+                self.login(username, password.expose()).await?
+            }
+            // Unreachable: only the JWT modes reach this path.
+            _ => return Err(Error::config("no JWT credentials configured")),
+        };
+
+        let expires_at = auth::token_expiry(&token);
+        self.store_token(CachedToken {
+            value: token.clone(),
+            expires_at,
+        });
+        Ok(token)
+    }
+
+    /// Reads the cached token, never holding the lock across an await.
+    fn cached_token(&self) -> Option<CachedToken> {
+        self.token
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+    }
+
+    /// Replaces the cached token.
+    fn store_token(&self, token: CachedToken) {
+        if let Ok(mut guard) = self.token.write() {
+            *guard = Some(token);
+        }
+    }
+
+    /// Drops the cached token so the next request obtains a fresh one.
+    fn invalidate_token(&self) {
+        if let Ok(mut guard) = self.token.write() {
+            *guard = None;
+        }
+    }
+
+    /// Exchanges a username and password for a user JWT at `/_open/auth`.
+    ///
+    /// The returned token carries the server's chosen lifetime — one hour on
+    /// ArangoDB 3.12 — which is why [`bearer_token`](Self::bearer_token)
+    /// refreshes rather than caching it indefinitely.
+    async fn login(&self, username: &str, password: &str) -> Result<String> {
+        let url = self
+            .base
+            .join("/_open/auth")
+            .map_err(|err| Error::config(format!("invalid login URL for this endpoint: {err}")))?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "username": username,
+            "password": password,
+        }))?;
+
+        let response = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        let payload = response.bytes().await.map_err(map_reqwest_error)?;
+        if !status.is_success() {
+            let detail =
+                arango_error_message(payload.as_ref()).unwrap_or_else(|| status.to_string());
+            return Err(Error::http(
+                status.as_u16(),
+                format!(
+                    "JWT login failed for user '{username}' at /_open/auth: {detail}. \
+                     Check the username and password; this endpoint does not accept a \
+                     JWT secret (use --jwt-secret-file for that)."
+                ),
+                ErrorContext::new(),
+            ));
+        }
+
+        serde_json::from_slice::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|v| v.get("jwt").and_then(|j| j.as_str().map(str::to_string)))
+            .ok_or_else(|| Error::config("POST /_open/auth succeeded but returned no 'jwt' field"))
     }
 
     /// Executes a request with retries, returning the response body on success.
@@ -543,7 +700,33 @@ impl ArangoClient {
         content_type: &'static str,
         body: Bytes,
     ) -> Result<Vec<u8>> {
-        let mut request = self.apply_auth(self.http.request(method, url));
+        match self
+            .attempt_body(&method, &url, content_type, body.clone())
+            .await
+        {
+            Err(err) if is_unauthorized(&err) && self.can_refresh_token() => {
+                // The token lapsed or was revoked mid-run. Re-authenticate once
+                // and retry; a second 401 is a real credential failure.
+                self.invalidate_token();
+                self.attempt_body(&method, &url, content_type, body)
+                    .await
+                    .map_err(|err| self.explain_auth_failure(err))
+            }
+            other => other,
+        }
+    }
+
+    /// One request attempt with a body, with auth applied.
+    async fn attempt_body(
+        &self,
+        method: &Method,
+        url: &reqwest::Url,
+        content_type: &'static str,
+        body: Bytes,
+    ) -> Result<Vec<u8>> {
+        let mut request = self
+            .apply_auth(self.http.request(method.clone(), url.clone()))
+            .await?;
         request = request.header(reqwest::header::CONTENT_TYPE, content_type);
         request = request.body(body);
 
@@ -569,8 +752,29 @@ impl ArangoClient {
         path: &str,
         body: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
+        match self.attempt_request(method, path, body).await {
+            Err(err) if is_unauthorized(&err) && self.can_refresh_token() => {
+                // See `send_body`: refresh once, then treat a 401 as terminal.
+                self.invalidate_token();
+                self.attempt_request(method, path, body)
+                    .await
+                    .map_err(|err| self.explain_auth_failure(err))
+            }
+            other => other,
+        }
+    }
+
+    /// One request attempt against a database-scoped path, with auth applied.
+    async fn attempt_request(
+        &self,
+        method: &Method,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let url = self.url_for(path)?;
-        let mut request = self.apply_auth(self.http.request(method.clone(), url));
+        let mut request = self
+            .apply_auth(self.http.request(method.clone(), url))
+            .await?;
         if let Some(payload) = body {
             request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
             request = request.body(payload.to_vec());
@@ -631,7 +835,35 @@ impl ArangoClientBuilder {
         self
     }
 
-    /// Uses JWT/bearer-token authentication.
+    /// Mints a **superuser** JWT from the server's JWT secret, the equivalent
+    /// of ArangoDB's `--server.jwt-secret-keyfile`.
+    ///
+    /// The client signs a short-lived token itself and re-mints it as needed,
+    /// so this mode cannot expire mid-operation. The secret is the raw contents
+    /// of the server's JWT secret file.
+    #[must_use]
+    pub fn jwt_secret(mut self, secret: impl Into<String>) -> Self {
+        self.config.auth = AuthConfig::JwtSecret {
+            secret: Secret::new(secret.into()),
+        };
+        self
+    }
+
+    /// Authenticates by logging in at `POST /_open/auth` and using the returned
+    /// user JWT.
+    ///
+    /// The server chooses the token lifetime (one hour on ArangoDB 3.12); the
+    /// client re-authenticates as it nears expiry and after any 401.
+    #[must_use]
+    pub fn jwt_login(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.config.auth = AuthConfig::JwtLogin {
+            username: username.into(),
+            password: Secret::new(password.into()),
+        };
+        self
+    }
+
+    /// Uses JWT/bearer-token authentication with a token you already hold.
     #[must_use]
     pub fn bearer_auth(mut self, token: impl Into<String>) -> Self {
         self.config.auth = AuthConfig::Bearer {
@@ -709,6 +941,7 @@ impl ArangoClientBuilder {
             config: self.config,
             retry: self.retry,
             base,
+            token: Arc::new(RwLock::new(None)),
         })
     }
 }
@@ -745,6 +978,11 @@ fn header_bool(response: &reqwest::Response, name: &str) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Whether an error is an HTTP 401, the signal that a token must be refreshed.
+fn is_unauthorized(error: &Error) -> bool {
+    matches!(error, Error::Http { status, .. } if *status == 401)
 }
 
 /// Extracts ArangoDB's `errorMessage` field from a JSON error body, if present.

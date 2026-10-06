@@ -21,10 +21,34 @@ pub enum AuthConfig {
         /// The password.
         password: Secret,
     },
-    /// JWT/bearer-token authentication.
+    /// JWT/bearer-token authentication with a token supplied by the caller.
+    ///
+    /// The token is sent as-is and never refreshed, because this crate has no
+    /// way to re-obtain it. If it carries an `exp` that elapses mid-run, the
+    /// server will start rejecting requests; prefer [`AuthConfig::JwtSecret`]
+    /// or [`AuthConfig::JwtLogin`] for long operations.
     Bearer {
         /// The bearer token.
         token: Secret,
+    },
+    /// Superuser JWT minted locally from the server's JWT secret.
+    ///
+    /// Equivalent to ArangoDB's own `--server.jwt-secret-keyfile`. The client
+    /// signs a short-lived superuser token and re-mints it as needed, so this
+    /// mode never expires mid-operation.
+    JwtSecret {
+        /// The server's JWT secret (`--server.jwt-secret-keyfile` contents).
+        secret: Secret,
+    },
+    /// User JWT obtained by logging in at `POST /_open/auth`.
+    ///
+    /// The server chooses the lifetime (one hour on ArangoDB 3.12), so the
+    /// client re-authenticates when the token nears expiry or is rejected.
+    JwtLogin {
+        /// The username to authenticate as.
+        username: String,
+        /// That user's password.
+        password: Secret,
     },
 }
 

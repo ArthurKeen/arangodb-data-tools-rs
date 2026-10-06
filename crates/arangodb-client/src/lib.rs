@@ -13,6 +13,7 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+mod auth;
 pub mod client;
 pub mod collection;
 pub mod cursor;

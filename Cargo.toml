@@ -69,5 +69,7 @@ async-compression = { version = "0.4", default-features = false, features = ["to
 csv-async = { version = "1", default-features = false, features = ["tokio"] }
 object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
 sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
 time = { version = "0.3", features = ["formatting"] }
 regex = "1"
