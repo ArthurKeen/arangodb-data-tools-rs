@@ -4,6 +4,7 @@
 //! types deliberately do not derive `Debug` in a way that prints them; callers
 //! must not log a [`CursorRequest`] (PRD §17).
 
+use arangodb_tools_core::redact::REDACTED;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -69,11 +70,15 @@ impl CursorRequest {
 }
 
 /// Manual `Debug` that never prints the query text or bind variables.
+///
+/// Uses the shared [`REDACTED`] placeholder rather than a local literal, so
+/// every redaction in the workspace reads identically and a reviewer grepping
+/// for the marker finds this one too.
 impl std::fmt::Debug for CursorRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CursorRequest")
-            .field("query", &"<redacted>")
-            .field("bind_vars", &self.bind_vars.as_ref().map(|_| "<redacted>"))
+            .field("query", &REDACTED)
+            .field("bind_vars", &self.bind_vars.as_ref().map(|_| REDACTED))
             .field("batch_size", &self.batch_size)
             .field("ttl", &self.ttl)
             .field("stream", &self.options.stream)
@@ -131,5 +136,42 @@ mod tests {
         assert!(!rendered.contains("hunter2"));
         assert!(!rendered.contains("users"));
         assert!(rendered.contains("redacted"));
+    }
+
+    /// The query text and bind variables must never reach a log, even via
+    /// `{:?}` on the whole request (PRD §17). Enforced by the manual `Debug`
+    /// impl; this test exists so that replacing it with a derive fails loudly
+    /// rather than silently leaking.
+    #[test]
+    fn debug_never_prints_the_query_or_bind_variables() {
+        let request = CursorRequest::new("FOR u IN users FILTER u.ssn == @ssn RETURN u")
+            .with_batch_size(100)
+            .with_bind_vars(serde_json::json!({"ssn": "123-45-6789"}));
+        let rendered = format!("{request:?}");
+
+        assert!(
+            !rendered.contains("ssn"),
+            "bind variable name leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("123-45-6789"),
+            "bind variable value leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("FOR u IN users"),
+            "query leaked: {rendered}"
+        );
+        assert!(rendered.contains(REDACTED), "redaction marker is used");
+        // Non-sensitive fields stay visible, or the impl would be useless.
+        assert!(rendered.contains("100"), "batch_size is still shown");
+    }
+
+    /// Serialization still carries the real values — redaction is a logging
+    /// concern, not a wire-format one.
+    #[test]
+    fn serialization_still_sends_the_real_query() {
+        let request = CursorRequest::new("RETURN 1");
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains("RETURN 1"), "the wire format is not redacted");
     }
 }

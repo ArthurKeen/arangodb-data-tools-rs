@@ -68,6 +68,68 @@ impl ErrorContext {
     }
 }
 
+impl std::fmt::Display for ErrorContext {
+    /// Renders the populated fields as ` [key=value, ...]`, or nothing at all
+    /// when empty, so it can be appended to any message unconditionally.
+    ///
+    /// Every `Error::Http` carries a context and most are empty; a bare
+    /// `HTTP 404:` reads better than `HTTP 404: []`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(collection) = &self.collection {
+            parts.push(format!("collection={collection}"));
+        }
+        if let Some(path) = &self.object_path {
+            parts.push(format!("path={path}"));
+        }
+        if let Some((start, end)) = self.byte_range {
+            parts.push(format!("bytes={start}-{end}"));
+        }
+        if let Some(batch) = self.batch {
+            parts.push(format!("batch={batch}"));
+        }
+        if let Some(response) = &self.server_response {
+            parts.push(format!("response={response}"));
+        }
+        if parts.is_empty() {
+            return Ok(());
+        }
+        write!(f, " [{}]", parts.join(", "))
+    }
+}
+
+impl ErrorContext {
+    /// Whether no field is populated.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.collection.is_none()
+            && self.object_path.is_none()
+            && self.byte_range.is_none()
+            && self.batch.is_none()
+            && self.server_response.is_none()
+    }
+
+    /// Sets the server response, trimmed and truncated.
+    ///
+    /// A server body can be large, and an error message is read by a human in
+    /// a terminal, so this keeps a usable prefix rather than the whole thing.
+    #[must_use]
+    pub fn server_response_truncated(self, response: impl AsRef<str>) -> Self {
+        const LIMIT: usize = 300;
+        let text = response.as_ref().trim();
+        if text.is_empty() {
+            return self;
+        }
+        // Truncate on a char boundary; a server body may be UTF-8.
+        let clipped: String = if text.chars().count() > LIMIT {
+            text.chars().take(LIMIT).chain("…".chars()).collect()
+        } else {
+            text.to_string()
+        };
+        self.server_response(clipped)
+    }
+}
+
 /// The unified error type for the ArangoDB data tools.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -81,7 +143,7 @@ pub enum Error {
     Connection(String),
 
     /// A non-success HTTP response from ArangoDB.
-    #[error("HTTP {status}: {message}")]
+    #[error("HTTP {status}: {message}{context}")]
     Http {
         /// HTTP status code.
         status: u16,
@@ -180,6 +242,70 @@ impl From<serde_json::Error> for Error {
 
 #[cfg(test)]
 mod tests {
+    /// An empty context must render as nothing, so `HTTP 404:` does not become
+    /// `HTTP 404: []`.
+    #[test]
+    fn an_empty_context_renders_as_nothing() {
+        assert_eq!(format!("{}", ErrorContext::new()), "");
+        assert!(ErrorContext::new().is_empty());
+    }
+
+    /// A populated context is appended to the message. Before this, the
+    /// context was stored and never shown, so setting it changed nothing a
+    /// user could see.
+    #[test]
+    fn a_populated_context_is_rendered_in_the_error_message() {
+        let error = Error::http(
+            500,
+            "500 Internal Server Error",
+            ErrorContext::new()
+                .collection("users")
+                .object_path("dump/users.data.jsonl")
+                .byte_range(0, 1024)
+                .batch(7)
+                .server_response("<html>gateway error</html>"),
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("collection=users"), "{rendered}");
+        assert!(
+            rendered.contains("path=dump/users.data.jsonl"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("bytes=0-1024"), "{rendered}");
+        assert!(rendered.contains("batch=7"), "{rendered}");
+        assert!(rendered.contains("gateway error"), "{rendered}");
+    }
+
+    /// A long server body is clipped rather than flooding a terminal.
+    #[test]
+    fn a_long_server_response_is_truncated() {
+        let body = "x".repeat(5000);
+        let context = ErrorContext::new().server_response_truncated(&body);
+        let stored = context.server_response.expect("set");
+        assert!(
+            stored.chars().count() <= 301,
+            "clipped to the limit plus ellipsis"
+        );
+        assert!(stored.ends_with('…'), "truncation is visible");
+    }
+
+    /// Truncation must not split a multi-byte character.
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let body = "é".repeat(5000);
+        let context = ErrorContext::new().server_response_truncated(&body);
+        let stored = context.server_response.expect("set");
+        assert!(stored.starts_with('é'), "still valid UTF-8: {stored}");
+    }
+
+    /// An empty or whitespace-only body adds nothing.
+    #[test]
+    fn a_blank_server_response_is_ignored() {
+        assert!(ErrorContext::new()
+            .server_response_truncated("   \n ")
+            .is_empty());
+    }
+
     use super::*;
 
     #[test]

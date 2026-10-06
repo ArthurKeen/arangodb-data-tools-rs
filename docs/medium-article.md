@@ -45,10 +45,19 @@ dump error carries an empty context — and the `Display` impl does not render t
 anyway.
 
 **The redaction helper.** Written specifically so that AQL queries and bind variables never
-reach a log in the clear. Called from nowhere. The requirement currently holds by accident —
-nothing logs queries today — rather than by enforcement. The request struct derives `Debug`
-with the query and binds in plain text, so the first `debug!(?request)` anyone adds leaks
-them silently.
+reach a log in the clear. Called from nowhere.
+
+And here is where the audit got one wrong, which is worth more than the finding. I recorded
+this as "the requirement holds by accident rather than by enforcement — the request struct
+derives `Debug` with the query in plain text." It does not. It has a hand-written `Debug`
+that redacts both the query and the bind variables. The protection was real and deliberate;
+it just used a local `"<redacted>"` literal instead of the shared constant, so my grep for
+the constant found nothing and I inferred absence from it.
+
+That is the failure mode of a grep-driven audit stated precisely: **absence of the symbol you
+searched for is not absence of the behavior.** I had the right instinct — go look — and then
+skipped the looking for one item out of six because the grep felt conclusive. The fix was to
+read the file.
 
 **Two progress counters.** `ProgressCounters` has a `server_errors` field with no increment
 method, and an `add_retries` method that nothing calls. Every progress event the tool has
@@ -115,7 +124,8 @@ want that property, you need a different instrument — a reachability sweep, a 
 read for zeros rather than for percentage, or an audit that demands evidence.
 
 **Demand mechanically checkable evidence, not prose.** "Implemented" is a claim. A verified
-`file:line` is a fact. The difference between them is where my six findings were hiding.
+`file:line` is a fact. The difference between them is where my findings were hiding — and
+the one finding I did *not* verify against the file is the one I got wrong.
 
 **Rank gaps by consequence, not by effort.** Of 41 open gaps in my project, exactly one can
 lose data without telling you — views silently missing from a dump. The other forty either

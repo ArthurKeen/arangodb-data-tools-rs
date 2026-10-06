@@ -87,11 +87,7 @@ impl ArangoClient {
                 if status.is_success() {
                     Ok(body.to_vec())
                 } else {
-                    let message = match arango_error_message(body.as_ref()) {
-                        Some(m) => m,
-                        None => status.to_string(),
-                    };
-                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                    Err(http_error(status, body.as_ref()))
                 }
             }
         })
@@ -152,11 +148,7 @@ impl ArangoClient {
                 if status.is_success() {
                     Ok(body.to_vec())
                 } else {
-                    let message = match arango_error_message(body.as_ref()) {
-                        Some(message) => message,
-                        None => status.to_string(),
-                    };
-                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                    Err(http_error(status, body.as_ref()))
                 }
             }
         })
@@ -374,11 +366,7 @@ impl ArangoClient {
                         has_more,
                     })
                 } else {
-                    let message = match arango_error_message(body.as_ref()) {
-                        Some(message) => message,
-                        None => status.to_string(),
-                    };
-                    Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+                    Err(http_error(status, body.as_ref()))
                 }
             }
         })
@@ -503,8 +491,7 @@ impl ArangoClient {
         if status.is_success() || status.as_u16() == 404 {
             return Ok(());
         }
-        let message = arango_error_message(payload.as_ref()).unwrap_or_else(|| status.to_string());
-        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+        Err(http_error(status, payload.as_ref()))
     }
 
     /// Creates a view from a definition as returned by the replication
@@ -805,11 +792,7 @@ impl ArangoClient {
             return Ok(payload.to_vec());
         }
 
-        let message = match arango_error_message(payload.as_ref()) {
-            Some(message) => message,
-            None => status.to_string(),
-        };
-        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+        Err(http_error(status, payload.as_ref()))
     }
 
     /// Performs a single HTTP request attempt.
@@ -855,11 +838,7 @@ impl ArangoClient {
             return Ok(payload.to_vec());
         }
 
-        let message = match arango_error_message(payload.as_ref()) {
-            Some(message) => message,
-            None => status.to_string(),
-        };
-        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+        Err(http_error(status, payload.as_ref()))
     }
 }
 
@@ -1045,6 +1024,28 @@ fn header_bool(response: &reqwest::Response, name: &str) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Builds an [`Error::Http`] for a failed response.
+///
+/// When the body is ArangoDB's `{"errorMessage": …}` envelope that message is
+/// the error. When it is not — a proxy's HTML page, a load balancer's plain
+/// text, an empty body — the previous behavior was to report only the status
+/// line and discard the body, which left the one clue the caller had on the
+/// floor. The raw body is attached as `server_response` instead (truncated;
+/// PRD §10).
+fn http_error(status: reqwest::StatusCode, body: &[u8]) -> Error {
+    match arango_error_message(body) {
+        Some(message) => Error::http(status.as_u16(), message, ErrorContext::new()),
+        None => {
+            let raw = String::from_utf8_lossy(body);
+            Error::http(
+                status.as_u16(),
+                status.to_string(),
+                ErrorContext::new().server_response_truncated(raw),
+            )
+        }
+    }
 }
 
 /// Whether an error is an HTTP 401, the signal that a token must be refreshed.

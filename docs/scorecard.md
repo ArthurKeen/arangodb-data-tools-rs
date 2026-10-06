@@ -1,6 +1,7 @@
 # Project Scorecard — arangodb-data-tools-rs
 
-_Last updated: 2026-10-05 (revised later the same day: JWT authentication implemented, and a
+_Last updated: 2026-10-06 (uncalled-capability sweep: destination guard, real retry counters,
+error-context rendering, and a correction to the redaction finding. Earlier on 2026-10-05: JWT authentication implemented, and a
 parse-time crash found in `dump`/`export` and fixed — see Authentication and the defect-shape
 section)._
 
@@ -30,8 +31,8 @@ not captured, so a view that uses one restores without error and then fails at q
 | Backup completeness | B+ | Collections, indexes, data and search views all round-trip. Custom analyzers are not dumped, so a view using one restores without error but cannot be queried |
 | Interoperability | D | Neither direction of `arangodump`/`arangorestore` compatibility exists; honestly disclosed, but a headline PRD goal |
 | Engineering quality | A | 275 tests green, clippy clean at `-D warnings`, live-server CI, 13.5k lines of Rust across 9 crates |
-| Observability | B | Structured JSON results and NDJSON progress on all five subcommands; two counters are wired to nothing and always report `0` |
-| Security posture | A− | Secrets never on argv or in process listings, TLS verified by default, `Secret` blocks `Debug`/`Display`, four explicit auth modes with conflicts refused; query/bind-var redaction helper still called from nowhere |
+| Observability | A− | Structured JSON results and NDJSON progress on all five subcommands; retry and server-error counters are now real, and a non-ArangoDB error body (a proxy's HTML page) is surfaced instead of discarded |
+| Security posture | A | Secrets never on argv or in process listings, TLS verified by default, `Secret` blocks `Debug`/`Display`, four explicit auth modes with conflicts refused, and AQL queries and bind variables redacted from `Debug` with a test that fails if the impl is replaced by a derive |
 | Library ergonomics | C+ | Crates are clean and documented, but the typed builders the PRD names as an alpha criterion are not built |
 | Documentation honesty | A | Every known limit is written down; no capability is claimed that the audit could not evidence |
 
@@ -115,11 +116,19 @@ The audit found the same failure six times, and it is worth naming because it is
 most likely to recur: **a capability is modeled and unit-tested at the type layer, then never
 called from any production path.**
 
-`put_if_absent` is implemented on both storage backends and tested, but manifests and
-checkpoints are written with unconditional puts — so two concurrent dumps to one prefix
-overwrite each other silently. `Inventory.views` and `ArtifactKind::View` are the view gap
-above. Three `ErrorContext` builders for object path, byte range, and server response are never
-called. The query/bind-variable redaction helper is never called. `ProgressCounters` has no
+`put_if_absent` was implemented on both storage backends and tested, while manifests and
+checkpoints were written with unconditional puts — so two concurrent dumps to one prefix
+overwrote each other silently. **Now closed**: a dump claims its destination with a
+conditional create before writing anything. `Inventory.views` and `ArtifactKind::View` are the view gap
+above. Of the three unused `ErrorContext` builders, `server_response` is **now used** — and the
+context is rendered at all, which it previously was not, so setting it had been invisible.
+`object_path` and `byte_range` remain unused: storage failures surface as `Error::Io`, which
+has no context slot, and giving it one is a larger change than this sweep. The shared redaction helper was never called — but this one was **overstated in the original
+audit, and the correction matters more than the finding**. `CursorRequest` already had a
+manual `Debug` impl that redacts both the query and the bind variables; the protection was
+real, it simply used a local `"<redacted>"` literal instead of the shared constant. The audit
+recorded it as "the requirement holds by accident rather than by enforcement", which was
+wrong. It is now one constant with a test that fails if someone swaps the impl for a derive. `ProgressCounters` has no
 increment path for `server_errors` and never calls `add_retries`, so both fields are hard
 `0` in every progress event emitted.
 
