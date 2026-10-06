@@ -1,10 +1,11 @@
 //! Shared connection/authentication CLI arguments.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use arangodb_client::{ArangoClient, ArangoClientBuilder};
-use arangodb_tools_core::{Error, Result, RetryPolicy};
+use arangodb_tools_core::{Error, Result, RetryPolicy, RetryStats};
 use clap::{Args, ValueEnum};
 
 /// How username/password credentials are presented to the server.
@@ -97,6 +98,17 @@ impl ConnectionArgs {
     /// Returns [`Error::Config`] if a named credential variable is unset or the
     /// client cannot be constructed.
     pub(crate) fn build_client(&self) -> Result<ArangoClient> {
+        self.build_client_with_stats(&Arc::new(RetryStats::new()))
+    }
+
+    /// Builds a client whose retry policy records into `stats`, so a command
+    /// can report the retries and server errors its run actually incurred
+    /// rather than a hard-coded zero.
+    ///
+    /// # Errors
+    /// Returns [`Error::Config`] if a named credential variable is unset or the
+    /// client cannot be constructed.
+    pub(crate) fn build_client_with_stats(&self, stats: &Arc<RetryStats>) -> Result<ArangoClient> {
         let mut builder: ArangoClientBuilder = ArangoClient::builder()
             .endpoint(&self.endpoint)
             .database(&self.database)
@@ -105,6 +117,7 @@ impl ConnectionArgs {
             .retry_policy(RetryPolicy {
                 max_attempts: self.max_retries.max(1),
                 max_delay: Duration::from_secs(self.max_retry_delay_secs.max(1)),
+                stats: Some(Arc::clone(stats)),
                 ..RetryPolicy::default()
             });
 

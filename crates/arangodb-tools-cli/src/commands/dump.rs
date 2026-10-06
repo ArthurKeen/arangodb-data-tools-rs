@@ -1,10 +1,12 @@
 //! The `arangox dump` subcommand.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use arangodb_dump::{run_dump_with_progress, DumpOptions, FilterOptions};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::Result;
+use arangodb_tools_core::RetryStats;
 use clap::Args;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -59,7 +61,8 @@ pub(crate) struct DumpArgs {
 
 /// Runs a dump job.
 pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
-    let client = args.connection.build_client()?;
+    let retry_stats = Arc::new(RetryStats::new());
+    let client = args.connection.build_client_with_stats(&retry_stats)?;
     let store = open_store_root(&args.output)?;
 
     let filters = FilterOptions::new(
@@ -101,6 +104,8 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
     let artifacts = manifest.artifacts.len();
 
     reporter.finished(ProgressSnapshot {
+        server_errors: retry_stats.server_errors(),
+        retries: retry_stats.retries(),
         batches: collections as u64,
         elapsed_secs: started.elapsed().as_secs_f64(),
         ..ProgressSnapshot::default()

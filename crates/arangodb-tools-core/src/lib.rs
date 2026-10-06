@@ -27,4 +27,4 @@ pub mod retry;
 
 pub use error::{Error, ErrorContext, Result};
 pub use redact::Secret;
-pub use retry::{retry, RetryPolicy, Retryable};
+pub use retry::{retry, RetryPolicy, RetryStats, Retryable};

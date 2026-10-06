@@ -4,6 +4,8 @@
 //! path can silently skip retries (a weakness of the reference C++ tools).
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::Error;
@@ -13,9 +15,22 @@ pub trait Retryable {
     /// Returns `true` if the operation that produced this error may succeed on
     /// a subsequent attempt.
     fn is_retryable(&self) -> bool;
+
+    /// Returns `true` if the server answered and reported the error, as
+    /// opposed to a transport or local failure.
+    ///
+    /// Defaults to `false` so existing implementors keep compiling; counting
+    /// nothing is the honest default for an error type that cannot tell.
+    fn is_server_error(&self) -> bool {
+        false
+    }
 }
 
 impl Retryable for Error {
+    fn is_server_error(&self) -> bool {
+        matches!(self, Error::Http { .. })
+    }
+
     fn is_retryable(&self) -> bool {
         match self {
             Error::Connection(_) => true,
@@ -38,6 +53,40 @@ impl Retryable for Error {
     }
 }
 
+/// What the retry loop actually did, shared across cloned policies.
+///
+/// `ProgressSnapshot` has always carried `retries` and `server_errors`, but
+/// nothing incremented them, so every progress event ever emitted reported a
+/// hard `0` for both. They were the shape of a measurement without being one.
+/// A policy carrying one of these makes them real.
+#[derive(Debug, Default)]
+pub struct RetryStats {
+    /// Retry attempts made (the first attempt is not a retry).
+    pub retries: AtomicU64,
+    /// Errors the server itself reported, whether or not they were retried.
+    pub server_errors: AtomicU64,
+}
+
+impl RetryStats {
+    /// Creates zeroed stats.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Retry attempts recorded so far.
+    #[must_use]
+    pub fn retries(&self) -> u64 {
+        self.retries.load(Ordering::Relaxed)
+    }
+
+    /// Server-reported errors recorded so far.
+    #[must_use]
+    pub fn server_errors(&self) -> u64 {
+        self.server_errors.load(Ordering::Relaxed)
+    }
+}
+
 /// Configuration for exponential backoff with optional full jitter.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -52,6 +101,8 @@ pub struct RetryPolicy {
     pub multiplier: f64,
     /// Whether to apply full jitter to the backoff interval.
     pub jitter: bool,
+    /// Optional shared counters recording what this policy's retries did.
+    pub stats: Option<Arc<RetryStats>>,
 }
 
 impl Default for RetryPolicy {
@@ -62,6 +113,7 @@ impl Default for RetryPolicy {
             max_delay: Duration::from_secs(30),
             multiplier: 2.0,
             jitter: true,
+            stats: None,
         }
     }
 }
@@ -118,6 +170,11 @@ where
         match op().await {
             Ok(value) => return Ok(value),
             Err(err) => {
+                if let Some(stats) = &policy.stats {
+                    if err.is_server_error() {
+                        stats.server_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 if attempt >= policy.max_attempts || !err.is_retryable() {
                     if attempt > 1 {
                         tracing::warn!(
@@ -127,6 +184,9 @@ where
                         );
                     }
                     return Err(err);
+                }
+                if let Some(stats) = &policy.stats {
+                    stats.retries.fetch_add(1, Ordering::Relaxed);
                 }
                 let delay = policy.backoff(attempt);
                 tracing::debug!(
@@ -160,6 +220,107 @@ fn pseudo_random() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// A policy with stats records every retry it performs.
+    ///
+    /// `ProgressSnapshot.retries` existed long before anything incremented it,
+    /// so this pins the wiring rather than the arithmetic: without the
+    /// recording in the loop these assertions read zero, which is exactly the
+    /// bug they exist to prevent returning.
+    #[tokio::test]
+    async fn retry_stats_record_attempts_and_server_errors() {
+        let stats = Arc::new(RetryStats::new());
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            jitter: false,
+            stats: Some(Arc::clone(&stats)),
+            ..RetryPolicy::default()
+        };
+
+        let attempts = std::sync::atomic::AtomicU64::new(0);
+        let result: Result<(), Error> = retry(&policy, || async {
+            // 503 is retryable and server-reported.
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Err(Error::http(503, "unavailable", crate::ErrorContext::new()))
+        })
+        .await;
+
+        assert!(result.is_err(), "all attempts fail");
+        assert_eq!(attempts.load(Ordering::Relaxed), 4, "four attempts made");
+        assert_eq!(stats.retries(), 3, "three of the four were retries");
+        assert_eq!(
+            stats.server_errors(),
+            4,
+            "every failure was server-reported"
+        );
+    }
+
+    /// A transport failure is counted as a retry but not as a server error:
+    /// the server never answered.
+    #[tokio::test]
+    async fn transport_failures_are_not_counted_as_server_errors() {
+        let stats = Arc::new(RetryStats::new());
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            jitter: false,
+            stats: Some(Arc::clone(&stats)),
+            ..RetryPolicy::default()
+        };
+
+        let result: Result<(), Error> = retry(&policy, || async {
+            Err(Error::Connection("refused".to_string()))
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(stats.retries(), 2, "two retries after the first attempt");
+        assert_eq!(
+            stats.server_errors(),
+            0,
+            "a connection failure is not a server-reported error"
+        );
+    }
+
+    /// A call that succeeds first time records nothing.
+    #[tokio::test]
+    async fn a_clean_run_records_no_retries() {
+        let stats = Arc::new(RetryStats::new());
+        let policy = RetryPolicy {
+            stats: Some(Arc::clone(&stats)),
+            ..RetryPolicy::default()
+        };
+        let result: Result<u8, Error> = retry(&policy, || async { Ok(7) }).await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(stats.retries(), 0);
+        assert_eq!(stats.server_errors(), 0);
+    }
+
+    /// Stats are shared across clones, so a policy handed to a client still
+    /// reports into the caller's counters.
+    #[test]
+    fn stats_survive_cloning_the_policy() {
+        let stats = Arc::new(RetryStats::new());
+        let policy = RetryPolicy {
+            stats: Some(Arc::clone(&stats)),
+            ..RetryPolicy::default()
+        };
+        let clone = policy.clone();
+        clone
+            .stats
+            .as_ref()
+            .expect("clone keeps stats")
+            .retries
+            .fetch_add(5, Ordering::Relaxed);
+        assert_eq!(
+            stats.retries(),
+            5,
+            "the clone writes into the same counters"
+        );
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -186,6 +347,7 @@ mod tests {
             max_delay: Duration::from_millis(2),
             multiplier: 2.0,
             jitter: false,
+            stats: None,
         }
     }
 
@@ -239,6 +401,7 @@ mod tests {
             max_delay: Duration::from_secs(1),
             multiplier: 2.0,
             jitter: false,
+            stats: None,
         };
         assert_eq!(policy.backoff(1), Duration::from_millis(100));
         assert_eq!(policy.backoff(2), Duration::from_millis(200));
@@ -254,6 +417,7 @@ mod tests {
             max_delay: Duration::from_secs(60),
             multiplier: 3.0,
             jitter: false,
+            stats: None,
         };
         assert_eq!(tripling.backoff(1), Duration::from_millis(10));
         assert_eq!(tripling.backoff(2), Duration::from_millis(30));
@@ -277,6 +441,7 @@ mod tests {
             max_delay: Duration::from_secs(1),
             multiplier: 2.0,
             jitter: true,
+            stats: None,
         };
         for _ in 0..1000 {
             assert!(policy.backoff(20) <= Duration::from_secs(1));

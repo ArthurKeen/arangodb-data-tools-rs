@@ -6,6 +6,7 @@ use std::time::Instant;
 use arangodb_restore::{run_restore_with_progress, RestoreCheckpointConfig, RestoreOptions};
 use arangodb_tools_core::progress::ProgressSnapshot;
 use arangodb_tools_core::Result;
+use arangodb_tools_core::RetryStats;
 use clap::Args;
 
 use super::connection::ConnectionArgs;
@@ -40,7 +41,8 @@ pub(crate) struct RestoreArgs {
 
 /// Runs a restore job.
 pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
-    let client = args.connection.build_client()?;
+    let retry_stats = Arc::new(RetryStats::new());
+    let client = args.connection.build_client_with_stats(&retry_stats)?;
     let store = open_store_root(&args.input)?;
 
     let checkpoint = match args.checkpoint.as_deref() {
@@ -63,6 +65,8 @@ pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
             .await?;
 
     reporter.finished(ProgressSnapshot {
+        server_errors: retry_stats.server_errors(),
+        retries: retry_stats.retries(),
         batches: summary.collections as u64,
         elapsed_secs: started.elapsed().as_secs_f64(),
         ..ProgressSnapshot::default()

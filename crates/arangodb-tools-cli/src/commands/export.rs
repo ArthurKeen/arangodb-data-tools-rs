@@ -1,5 +1,6 @@
 //! The `arangox export` subcommand.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use arangodb_client::CursorRequest;
@@ -9,6 +10,7 @@ use arangodb_export::{
 };
 use arangodb_storage::{ObjectPath, ObjectStore};
 use arangodb_tools_core::progress::ProgressSnapshot;
+use arangodb_tools_core::RetryStats;
 use arangodb_tools_core::{Error, Result};
 use clap::Args;
 use time::format_description::well_known::Rfc3339;
@@ -79,7 +81,8 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
     };
     let compression = args.compression.resolve(&args.output);
 
-    let client = args.connection.build_client()?;
+    let retry_stats = Arc::new(RetryStats::new());
+    let client = args.connection.build_client_with_stats(&retry_stats)?;
     let (store, path) = open_output(&args.output)?;
 
     reporter.started("export");
@@ -111,6 +114,8 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
         let manifest_name = format!("{}.manifest.json", args.output);
 
         reporter.finished(ProgressSnapshot {
+            server_errors: retry_stats.server_errors(),
+            retries: retry_stats.retries(),
             batches: parts as u64,
             elapsed_secs: started.elapsed().as_secs_f64(),
             ..ProgressSnapshot::default()
@@ -150,6 +155,8 @@ pub(crate) async fn run(args: ExportArgs, reporter: Reporter) -> Result<()> {
     .await?;
 
     reporter.finished(ProgressSnapshot {
+        server_errors: retry_stats.server_errors(),
+        retries: retry_stats.retries(),
         bytes_written: meta.size,
         elapsed_secs: started.elapsed().as_secs_f64(),
         ..ProgressSnapshot::default()
