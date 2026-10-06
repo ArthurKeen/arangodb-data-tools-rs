@@ -243,7 +243,22 @@ Responsibilities:
 
 - Support endpoint URL, database name, username, and password.
 - Support password via environment variable, prompt, or secrets provider hook.
-- Support JWT/bearer token authentication if practical.
+- Support JWT/bearer token authentication, including *obtaining* a token rather
+  than only accepting one: by logging in at `POST /_open/auth` with a username
+  and password, and by minting a superuser JWT locally from the server's JWT
+  secret (the equivalent of ArangoDB's `--server.jwt-secret-keyfile`).
+- Treat JWT expiry as a correctness requirement, not an operational detail. A
+  token from `/_open/auth` is short-lived (one hour on ArangoDB 3.12), which is
+  shorter than many dump and import runs. In any mode where the tool can
+  re-obtain the credential it must refresh before expiry and retry once after a
+  rejection; in a mode where it cannot — a token supplied by the caller — that
+  limitation must be documented.
+- Accept exactly one credential source per invocation. Supplying two is an error
+  naming both, never a precedence rule the user is expected to learn.
+- Report an authentication failure with the mode that failed and what to check.
+  The server answers identically whether a secret is wrong, a required claim is
+  missing, or the user lacks rights, so relaying its message alone is not
+  actionable.
 - Support TLS configuration, custom CA certificates, and insecure development mode.
 - Support request timeouts and retry policies.
 - Fail with a clear, actionable error when server permissions are insufficient for the requested operation (e.g. all-databases dump and `_users` restore require `_system`-level access). Where a cheap check exists, preflight permissions before starting long-running work.
@@ -453,19 +468,30 @@ The pipeline must have an explicit, documented backpressure model. This is the s
 --password-env
 --password-prompt
 --auth-token-env
+--jwt-secret-file
+--jwt-secret-env
+--auth basic|jwt
 --tls-ca
 --insecure
 --threads
 --batch-size
 --storage-config
---output text|json
+--output-format text|json
 --progress
 --dry-run
 ```
 
-`--output` is global rather than per-subcommand: it selects both the result
-rendering on stdout and whether newline-delimited progress events are emitted on
-stderr, so it governs presentation as a whole and not only log formatting.
+`--output-format` is global rather than per-subcommand: it selects both the
+result rendering on stdout and whether newline-delimited progress events are
+emitted on stderr, so it governs presentation as a whole and not only log
+formatting.
+
+It is named `--output-format`, not `--output`, because `dump` and `export` take
+`--output` for their destination path. A global `--output` collides with those:
+an argument parser that derives option identity from a single name sees one
+option declared twice with two different value types, which is a startup
+failure rather than a usage error. The destination keeps the shorter name, since
+that matches `arangodump`/`arangoexport` convention.
 
 ### 13.2 Import CLI
 
@@ -570,6 +596,10 @@ ImportJob::builder()
 - Restore selected collections.
 - Validate indexes and views where supported.
 - Negative compatibility fixtures: an Enterprise-encrypted dump (`ENCRYPTION` marker) and a VelocyPack dump must be refused loudly — assert the error messages and that no partial server-state mutation occurs (§9.4, §19).
+- Authentication: cover both JWT modes against a server started with a known
+  `--server.jwt-secret-keyfile` — a minted superuser token is accepted and carries superuser
+  rights, a login at `/_open/auth` yields a usable token, and a wrong secret and a wrong
+  password each fail with a message naming what to check (§8.1).
 - Throughput benchmark harness: official `arangoimport` vs `arangox import` on a shared JSONL fixture against the same server (§11.1).
 
 ### 16.3 Storage Tests

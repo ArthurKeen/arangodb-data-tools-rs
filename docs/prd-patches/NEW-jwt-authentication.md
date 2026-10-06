@@ -1,7 +1,7 @@
-# Proposed PRD patch (NOT applied) — new requirement: JWT authentication
+# PRD patch — APPLIED — new requirement: JWT authentication
 
 **delta_type:** new-requirement
-**review_state:** proposed
+**review_state:** ACCEPTED and applied 2026-10-05
 **created:** 2026-10-05
 **relates to:** REQ-002 (§8.1 credential sources), REQ-110 (§13.1 common CLI options)
 

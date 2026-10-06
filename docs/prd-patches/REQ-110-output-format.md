@@ -1,7 +1,7 @@
-# Proposed PRD patch (NOT applied) — REQ-110 / §13.1
+# PRD patch — APPLIED — REQ-110 / §13.1
 
 **delta_type:** wrong-signature
-**review_state:** proposed
+**review_state:** ACCEPTED and applied 2026-10-05
 **created:** 2026-10-05
 
 ## Observed
