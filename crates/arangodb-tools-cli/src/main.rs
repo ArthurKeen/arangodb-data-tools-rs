@@ -16,8 +16,12 @@ struct Cli {
     /// Output mode. `text` (default) prints human-readable summaries; `json`
     /// prints a machine-readable result object on stdout and newline-delimited
     /// progress events on stderr (intended for programmatic callers).
-    #[arg(long, global = true, value_enum, default_value_t = OutputMode::Text)]
-    output: OutputMode,
+    ///
+    /// Named `--output-format` rather than `--output` because `dump` and
+    /// `export` take `--output` for their destination; one `--output` used for
+    /// both a format and a path collides at parse time.
+    #[arg(long = "output-format", global = true, value_enum, default_value_t = OutputMode::Text)]
+    output_format: OutputMode,
 
     #[command(subcommand)]
     command: Command,
@@ -40,7 +44,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let reporter = Reporter::new(cli.output);
+    let reporter = Reporter::new(cli.output_format);
     let result = match cli.command {
         Command::Import(args) => commands::import::run(args, reporter).await,
         Command::Export(args) => commands::export::run(args, reporter).await,

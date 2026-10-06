@@ -7,7 +7,7 @@ toolkit.
 A single binary with `import`, `export`, `dump`, `restore`, and `rdf`
 subcommands. It reads and writes local files or object storage (S3-compatible),
 supports gzip/zstd compression, live progress reporting, and machine-readable
-output via `--output json`.
+output via `--output-format json`.
 
 ## Install
 

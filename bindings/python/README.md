@@ -74,7 +74,7 @@ All functions accept the shared connection kwargs (`endpoint`, `database`,
 
 For polyglot callers there are two supported patterns:
 
-1. **Subprocess + `--output json`** (works for all four tools today): run the
+1. **Subprocess + `--output-format json`** (works for all four tools today): run the
    `arangox` CLI and parse the JSON result on stdout / NDJSON progress on
    stderr. Language-agnostic.
 2. **Native bindings** (this crate): in-process, no serialization round-trip,

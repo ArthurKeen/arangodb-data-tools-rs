@@ -1,4 +1,4 @@
-//! Hermetic checks for the `--output json` mode.
+//! Hermetic checks for the `--output-format json` mode.
 //!
 //! These drive the `arangox` binary with an input that fails *before* any
 //! network call (a missing import file), so they need no server. They assert
@@ -13,7 +13,7 @@ const ARANGOX: &str = env!("CARGO_BIN_EXE_arangox");
 #[test]
 fn json_mode_renders_errors_as_json_on_stderr() {
     let output = Command::new(ARANGOX)
-        .args(["--output", "json", "import"])
+        .args(["--output-format", "json", "import"])
         .args(["--collection", "c"])
         .args(["--input", "/no/such/arangox-test-file.jsonl"])
         .output()

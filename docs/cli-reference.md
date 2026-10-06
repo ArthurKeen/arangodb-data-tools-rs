@@ -5,11 +5,11 @@ subcommands — `import`, `export`, `dump`, `restore`, and `rdf` — plus a glob
 `--output` mode.
 
 ```text
-arangox [--output text|json] <command> [options]
+arangox [--output-format text|json] <command> [options]
 ```
 
 - `--output text` (default): human-readable summaries on stdout.
-- `--output json`: a machine-readable result object on stdout and
+- `--output-format json`: a machine-readable result object on stdout and
   newline-delimited progress events on stderr (for programmatic callers). See
   [`docs/backends.md`](backends.md) for how storage locations are given, and
   [`docs/resume.md`](resume.md) for checkpointing.
