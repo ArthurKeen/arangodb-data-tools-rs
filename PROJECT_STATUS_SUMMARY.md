@@ -1,191 +1,111 @@
 # ArangoDB Data Tools (Rust) — Project Status Summary
 
-**Project Status:** MVP Complete (Phases 0–4); Remaining work: Phases 5–7
+**Status:** Phases 0–7 complete. Pre-alpha, version `0.1.0`, no release tagged.
+**Last updated:** 2026-10-05 (commit `a66988c`).
+
+For graded project health and the full gap analysis, see [`docs/scorecard.md`](docs/scorecard.md).
+This document is the delivery view: what shipped, what is left, and in what order.
 
 ---
 
-## What's Done ✅
+## What's done
 
-| Phase | Title | Status | Key Deliverables |
-|-------|-------|--------|------------------|
-| **0** | Foundations | ✅ Complete | Error taxonomy, retry, bounded pipeline, work queue, progress events, config, manifest types, Docker integration harness |
-| **1** | Import MVP | ✅ Complete | JSONL/JSON/CSV/TSV readers, local/gzip/zstd support, batch sender pool, duplicate modes, collection creation, edge validation, `arangox-import` CLI, benchmark harness |
-| **2** | Object Storage | ✅ Complete | S3-compatible backend (via `object_store` crate), local filesystem, URI parsing, multipart writes, streaming ranged reads, `put_if_absent`, listing |
-| **3** | Export MVP | ✅ Complete | Cursor-based collection/AQL export, JSONL/JSON/CSV formats, compression, split, manifest, parallel export, `arangox-export` CLI |
-| **4** | Dump & Restore MVP | ✅ Complete | Single-server inventory/metadata/data dump, `/_api/replication` API, manifest-driven restore, index ordering, dependency resolution, `arangox-dump`/`arangox-restore` CLIs |
+| Phase | Title | Key deliverables |
+|-------|-------|------------------|
+| **0** | Foundations | Error taxonomy, retry, bounded pipeline, work queue, progress events, config, manifest types, Docker integration harness |
+| **1** | Import MVP | JSONL/JSON/CSV/TSV readers, gzip/zstd, batch sender pool, duplicate modes, collection creation, edge validation, benchmark harness |
+| **2** | Object storage | S3-compatible backend, local filesystem, URI parsing, multipart writes, streaming ranged reads, `put_if_absent`, listing |
+| **3** | Export MVP | Cursor-based collection/AQL export, JSONL/JSON/CSV, compression, size-split + manifest, parallel export |
+| **4** | Dump & restore MVP | Single-server inventory/structure/data dump, `/_api/replication` protocol, manifest-driven restore, index ordering, dependency resolution |
+| **5** | Multi-DB, resume, splitting | All-databases dump, import resume (batch-index checkpoints), restore resume (fingerprint-bound), large-object split, adaptive batching, collection filters, retry tuning |
+| **6** | RDF import | N-Triples/N-Quads/Turtle streaming parsers, PGT and RPT graph models, deterministic hashed keys, literal and named-graph policies |
+| **7** | Cloud backends | GCS, Azure, SeaweedFS via the S3 gateway, cross-backend CI matrix, per-backend setup docs |
 
-**Current public API surface:** `arangodb-import`, `arangodb-export`, `arangodb-dump`, `arangodb-restore` stable; library builders fully documented.
+**CLI:** one `arangox` binary with `import`, `export`, `dump`, `restore`, and `rdf`
+subcommands, sharing one set of connection, auth, and output flags.
 
----
+**Quality gates, verified on `a66988c`:** 275 tests pass (0 fail, 1 ignored), clippy clean
+under `-D warnings`, `cargo fmt --check` clean. CI runs against a live ArangoDB 3.12 service,
+with the cross-backend matrix on a weekly schedule.
 
-## What's Remaining 🚀
-
-### Phase 5: Multi-Database, Resume Hardening, Splitting (6–8 weeks)
-
-| Task | Status | Rationale |
-|------|--------|-----------|
-| **5.1 All-Databases Dump** | Not started | Production use case: dump all DBs in one operation; manifest partitions by database |
-| **5.2 Import Resume** | Not started | Large imports can fail halfway; checkpoint-driven continuation avoids duplicates |
-| **5.3 Restore Resume** | Not started | Large restores (hours) need checkpoint continuation; critical for large deployments |
-| **5.4 Large-Object Split** | Not started | 10 GB export → 100 MB parts; interrupt at part boundary, not mid-upload |
-| **5.5 Adaptive Batching** | Not started | Server rate-limit (429) → reduce concurrency; slow recovery → increase; throughput optimization |
-| **5.6 Collection Filters** | Not started | Dump subset of DB by regex pattern; restore sees filtered manifest only |
-| **5.7 Retry Tuning** | Not started | Configurable backoff; telemetry-driven defaults |
-
-**Why Phase 5 first:** Checkpoint infrastructure gates all resume work; enables production large-scale scenarios.
-
-### Phase 6: RDF Import MVP (4–6 weeks)
-
-| Task | Status | Rationale |
-|------|--------|-----------|
-| **6.1 RDF Parsers** | Not started | N-Triples, Turtle, N-Quads (streaming); crate choice spike pending |
-| **6.2 Graph Model** | Not started | Deterministic key generation (SHA-256), literal policies, bulk load |
-| **6.3 CLI** | Not started | `arangox rdf import` subcommand |
-
-**Why Phase 6 next (after Phase 5):** Independent; many users need RDF bulk load; can run in parallel with Phase 7.
-
-### Phase 7: Cloud Backends (3–4 weeks)
-
-| Task | Status | Rationale |
-|------|--------|-----------|
-| **7.1 GCS** | Not started | Google Cloud Storage support via `object_store` adapter |
-| **7.2 Azure** | Not started | Azure Blob Storage support |
-| **7.3 SeaweedFS** | Not started | S3-compatible endpoint docs; nightly CI optional |
-| **7.4 Cross-backend CI** | Not started | Test matrix (local, S3, GCS, Azure) for all operations |
-| **7.5 Backend Docs** | Not started | Setup guides, performance notes, troubleshooting |
-
-**Why Phase 7 last:** All backends reuse stable storage trait; feature gates for optional dependencies.
+**Scale:** 9 crates, ~13,500 lines of Rust under `src/`, 13 integration test files.
 
 ---
 
-## Critical Path & Parallelization
+## What's remaining
 
-```
-Phase 0 → 1 → 2 → 3 → 4 ✅
-                    ↓
-                Phase 5 (checkpoint infrastructure)
-                 ↙    ↘
-           Phase 6   Phase 7
-          (RDF)    (Cloud)
-           ↓        ↓
-          Merge → Final CI/Docs
-```
+Phase numbering ended at 7. Remaining work comes from the PRD requirement audit: **41 open
+gaps — 17 missing, 24 partial** — out of 130 requirements. Ranked by consequence.
 
-- **Serial (critical path):** Phases 0–5 (checkpoint work gates resume).
-- **Parallel:** Phase 6 (RDF) and 7 (cloud backends) after Phase 5 foundations.
-- **Estimated total:** 13–18 weeks (5 weeks complete, 8–13 remaining).
+### P0 — correctness and data safety
 
----
+| Item | Requirements | Why it ranks here |
+|------|------|------|
+| **Dump and restore views** | REQ-038, REQ-058 | ArangoSearch and `search-alias` definitions are parsed from the inventory and then dropped. A dump of a view-using database is silently incomplete — the only open gap that loses data without an error. |
+| **Read the `ENCRYPTION` marker** | REQ-078 | Encryption is detected only via the manifest, which an official ArangoDB dump directory does not carry. |
+| **Restore dependency ordering** | REQ-056 | `distributeShardsLike` prototypes, `_analyzers` first, `_users` last. Restoring `_users` mid-run can invalidate the running credentials. |
+| **Wire the built-but-uncalled capabilities** | REQ-076, REQ-087, REQ-105, REQ-124 | `put_if_absent`, three `ErrorContext` builders, the redaction helper, and two progress counters are each implemented, tested, and called from nowhere. Concurrent dumps to one prefix currently overwrite each other silently. |
 
-## Quick Start for Implementation
+### P1 — stated goals with nothing behind them
 
-1. **Read the detailed plan:** [`IMPLEMENTATION_PLAN_REMAINING.md`](IMPLEMENTATION_PLAN_REMAINING.md)
-2. **Pick the first task:** Phase 5.1 (all-databases dump) or 5.2 (import resume).
-3. **Create feature branch:** `feat/phase-5.1-all-databases` or similar.
-4. **Write tests first:** unit tests for checkpoint/manifest changes; integration test with Docker.
-5. **Integrate incrementally:** checkpoint types → manifest shape → dump logic → restore logic.
-6. **Benchmark:** measure throughput before/after (should be neutral).
-7. **Docs:** update `docs/dump-format.md`, `docs/resume.md`, CLI help text.
+| Item | Requirements | Notes |
+|------|------|------|
+| **Typed library builders** | REQ-112 | A §21 first-alpha acceptance criterion. The §14 API sketch does not compile against the real crates. |
+| **`arangodump`/`arangorestore` interop** | REQ-041, REQ-048, REQ-115, REQ-116 | Neither direction exists. Scoped best-effort in the PRD, disclosed in the README, but a headline goal. |
+| **Resumable dump** | REQ-045, REQ-085 | Import and restore resume; dump restarts from zero. The PRD asks for symmetry. |
 
----
+### P2 — breadth and polish
 
-## Key Design Decisions (Recorded for Reference)
-
-### Phase 0–4 (Complete)
-
-1. **Async-first, bounded everywhere:** every pipeline stage has backpressure via bounded channels + global in-flight-byte semaphore.
-2. **Library first, CLI second:** all logic lives in typed builders; CLI is thin adapter.
-3. **Storage abstraction:** nothing above `arangodb-storage` knows local vs. S3.
-4. **Manifest is canonical:** no filename guessing; manifest is the source of truth.
-5. **`object_store` crate for S3/GCS/Azure:** proven, correct, covers PRD §10 except restart-resumable multipart (deferred to Phase 5.5).
-
-### Phase 5–7 (To Decide)
-
-1. **RDF crate:** spike to choose `oxrdf`/`oxttl` vs `rio` (streaming N-Triples/Turtle).
-2. **Checkpoint location:** independent of dump/import source (separate writable path); clear error if unavailable.
-3. **Restart-resumable multipart:** deferred to Phase 5.5; backend-specific (S3 upload ID + parts); for now, each part = full object.
+| Item | Requirements |
+|------|------|
+| Restore topology overrides and collection/view filters | REQ-059, REQ-061 |
+| Parallel `/_api/dump/*` protocol; concurrent collection/shard processing | REQ-047, REQ-092, REQ-098 |
+| Human-readable CLI progress (text mode has none) | REQ-017, REQ-103, REQ-106 |
+| Index-ordering benchmark and configurable order | REQ-057 |
+| Export manifest for non-split exports; schema hints | REQ-032 |
+| RDF predicate-to-edge mapping; incremental dictionary for large inputs | REQ-072, REQ-074, REQ-094 |
+| Permission-failure error clarity | REQ-006 |
+| Negative compatibility fixtures | REQ-119 |
 
 ---
 
-## Testing Pyramid (Phases 5–7)
+## Recommended sequence
 
-| Layer | Coverage | Phases |
-|-------|----------|--------|
-| Unit | Checkpoint serialization, key generation, backoff math, regex matching | 5, 6 |
-| Integration (Docker) | Resume scenarios, split/concatenate, all-DB dump/restore, RDF parse+load, filters | 5, 6 |
-| Storage | Round-trip per backend (local, S3, GCS, Azure, SeaweedFS) | 5, 7 |
-| Chaos | Kill dump/restore mid-operation; verify resume from checkpoint | 5 |
-| Benchmark | Throughput before/after tuning; per-backend baseline | 5, 7 |
+1. **Views (REQ-038/058).** Highest consequence, self-contained, and the only item that
+   changes whether a dump can be trusted as a backup.
+2. **The uncalled-capability sweep.** Mostly wiring, closes a disproportionate share of the
+   partial requirements, and removes the silent concurrent-dump overwrite.
+3. **Typed builders (REQ-112).** Clears the last §21 alpha criterion and stabilizes the
+   library surface before anyone depends on it.
+4. **Interop, one direction first.** Reading official dumps is the more useful half.
 
----
-
-## Documentation Created/Updated
-
-- ✅ **`IMPLEMENTATION_PLAN_REMAINING.md`** — This plan (detailed, actionable, per-task).
-- ✅ **`PROJECT_STATUS_SUMMARY.md`** — This summary (executive overview).
-- 🔲 **`docs/resume.md`** — NEW (Phase 5): checkpoint semantics, at-least-once guarantees.
-- 🔲 **`docs/dump-format.md`** — UPDATE (Phase 5): multi-DB shape, split artifacts.
-- 🔲 **`docs/rdf-model.md`** — NEW (Phase 6): graph model, literal policies, key generation.
-- 🔲 **`docs/backends.md`** — NEW (Phase 7): per-backend setup, feature matrix.
-- 🔲 **`docs/cli-reference.md`** — NEW or UPDATE (all phases): comprehensive CLI flag reference.
-- 🔲 **`README.md`** — UPDATE: current status, phase completion badges.
+Items 1–3 are what stand between this project and a defensible `v0.1.0` alpha tag.
 
 ---
 
-## Risk Register (Phases 5–7)
+## Key design decisions
 
-| Risk | Impact | Mitigation |
-|------|--------|----------|
-| Checkpoint semantics race condition (Phase 5) | Resume duplicates or skips data | Atomic `put_if_absent` for checkpoint files; contiguous-prefix validation; chaos tests |
-| RDF crate performance (Phase 6) | Slow parsing; unacceptable for large files | Spike early; benchmark `oxttl` vs `rio`; profile hotspots |
-| GCS/Azure auth scope creep (Phase 7) | Over-engineering complex credential flows | Start with env-var/keyfile only; defer SAML/Workload Identity to docs/later phases |
-| Multipart restart corner cases (Phase 5.5) | Complex state management, bugs hard to find | Test fixture: interrupt mid-upload, verify resume; don't ship until proven |
-| Resume correctness with concurrent senders (Phase 5) | Data duplication/loss on retry | Contiguous-prefix checkpointing; logical-key approach; integration tests with small batch sizes |
-
----
-
-## Definition of Done per Phase
-
-### Phase 5
-- [ ] All resume scenarios pass integration tests (interrupt, verify no duplication/loss).
-- [ ] All-DB dump/restore validated against Docker ArangoDB.
-- [ ] Large-object split tested with 10+ parts; concatenation transparent.
-- [ ] Adaptive batching reduces concurrency under 429; throughput stays positive.
-- [ ] Collection filters (regex include/exclude) work end-to-end.
-- [ ] CLI flags finalized; help text clear.
-- [ ] `docs/resume.md` and `docs/dump-format.md` complete.
-
-### Phase 6
-- [ ] N-Triples, Turtle, N-Quads parsers fully functional.
-- [ ] Deterministic key generation verified (re-import → no new vertices).
-- [ ] All three literal policies tested.
-- [ ] 10K+ triple import round-trip passes; counts match expected model.
-- [ ] `arangox rdf import` CLI works; help text clear.
-- [ ] `docs/rdf-model.md` complete with examples.
-
-### Phase 7
-- [ ] GCS, Azure backends round-trip successfully (dump/restore).
-- [ ] SeaweedFS documented as working S3-compatible option.
-- [ ] CI matrix runs; all backends pass critical operations.
-- [ ] Performance baselines recorded (MB/sec, docs/sec per backend).
-- [ ] `docs/backends.md` complete with setup guides and examples.
-
----
-
-## Next Steps (First Actions)
-
-1. **Approve plan:** review this document; confirm sequencing and scope.
-2. **Set up tracking:** create GitHub issues for each Phase 5–7 task.
-3. **Spike RDF crate:** benchmark `oxttl` vs `rio` in isolation; record results.
-4. **Start Phase 5.1:** branch `feat/phase-5.1-all-databases`; implement manifest extensions.
-5. **Build CI infrastructure:** ensure Docker ArangoDB is stable in CI; add feature gates for optional backends.
+1. **Async-first, bounded everywhere.** Every pipeline stage has backpressure via bounded
+   channels plus a global in-flight-byte semaphore.
+2. **Manifest is canonical.** No filename guessing; the manifest is written last, so a
+   truncated dump is detectably incomplete rather than quietly partial.
+3. **Storage abstraction.** Nothing above `arangodb-storage` knows local from S3.
+4. **Batch-index resume, not byte offsets.** Deterministic batching means a restart re-derives
+   the same batch sequence, so resume works for non-seekable sources too. A contiguous
+   high-water mark keeps concurrent out-of-order sends from advancing the checkpoint past an
+   uncommitted batch.
+5. **Fail loudly over silent misbehavior.** Dump refuses clusters by server role; restore
+   refuses encrypted and VelocyPack dumps; an inconclusive role probe warns and proceeds
+   rather than blocking single-server users.
+6. **`object_store` for S3/GCS/Azure.** Proven and correct; avoids hand-rolling three
+   credential flows.
 
 ---
 
 ## References
 
-- **PRD:** [`RUST_ARANGODB_TOOLS_PRD.md`](RUST_ARANGODB_TOOLS_PRD.md) — user needs, non-goals, crate structure.
-- **Implementation Plan (Phases 0–4):** [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — architecture, phase definitions, testing strategy.
-- **Remaining Work (Phases 5–7):** [`IMPLEMENTATION_PLAN_REMAINING.md`](IMPLEMENTATION_PLAN_REMAINING.md) — detailed tasks, APIs, exit criteria.
-- **Crate READMEs:** each crate documents its role and public API.
-
+- [`docs/scorecard.md`](docs/scorecard.md) — graded health and the full gap analysis.
+- [`RUST_ARANGODB_TOOLS_PRD.md`](RUST_ARANGODB_TOOLS_PRD.md) — source of truth for requirements.
+- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — architecture and phase definitions.
+- [`docs/cli-reference.md`](docs/cli-reference.md) — every subcommand and flag.
+- [`docs/benchmarks.md`](docs/benchmarks.md) — throughput method and caveats.

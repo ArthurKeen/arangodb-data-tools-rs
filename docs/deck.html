@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arangodb-data-tools-rs</title>
+<style>
+  :root{
+    --bg:#0f1115; --fg:#e8eaed; --muted:#9aa3af; --accent:#f05033;
+    --accent2:#5ac8fa; --rule:#262a33; --card:#171a21; --warn:#f0b429;
+  }
+  @media print{ :root{ --bg:#fff; --fg:#14161a; --muted:#52596a; --rule:#d8dbe2; --card:#f5f6f8; } }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;}
+  .deck{max-width:none}
+  section{
+    min-height:100vh; display:flex; flex-direction:column; justify-content:center;
+    padding:7vh 9vw; border-bottom:1px solid var(--rule); position:relative;
+    page-break-after:always; break-after:page;
+  }
+  section::after{
+    content:attr(data-n); position:absolute; right:9vw; bottom:4vh;
+    color:var(--muted); font-size:.75rem; letter-spacing:.08em;
+  }
+  h1{font-size:clamp(2rem,5.5vw,3.6rem); line-height:1.1; margin:0 0 .6em; letter-spacing:-.02em}
+  h2{font-size:clamp(1.5rem,3.4vw,2.4rem); line-height:1.15; margin:0 0 .7em; letter-spacing:-.01em}
+  h1 + p.sub{font-size:clamp(1rem,2vw,1.4rem); color:var(--muted); margin:.2em 0}
+  p,li{font-size:clamp(.95rem,1.35vw,1.15rem); max-width:62ch}
+  ul,ol{padding-left:1.2em} li{margin:.45em 0}
+  strong{color:#fff} @media print{strong{color:#000}}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
+    background:var(--card); padding:.12em .4em; border-radius:4px}
+  blockquote{margin:1em 0; padding:.7em 1.1em; border-left:3px solid var(--accent);
+    background:var(--card); color:var(--fg); border-radius:0 6px 6px 0}
+  blockquote p{margin:0}
+  table{border-collapse:collapse; margin:.8em 0; font-size:clamp(.9rem,1.25vw,1.05rem)}
+  td,th{border-bottom:1px solid var(--rule); padding:.5em .9em; text-align:left; vertical-align:top}
+  th{color:var(--muted); font-weight:600; font-size:.85em; text-transform:uppercase; letter-spacing:.05em}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums}
+  .big{font-size:clamp(1.6rem,4vw,2.6rem); font-weight:700; font-variant-numeric:tabular-nums}
+  .accent{color:var(--accent)} .accent2{color:var(--accent2)} .warn{color:var(--warn)}
+  .kicker{color:var(--accent); font-size:.8rem; letter-spacing:.14em; text-transform:uppercase; margin:0 0 1.2em}
+  .meta{color:var(--muted); font-size:.9rem; margin-top:2em}
+  .grid{display:flex; gap:2.5rem; flex-wrap:wrap}
+  hr{border:0;border-top:1px solid var(--rule);margin:1.2em 0}
+  @media screen{
+    .nav{position:fixed; right:14px; bottom:12px; z-index:9; display:flex; gap:6px}
+    .nav button{background:var(--card); color:var(--fg); border:1px solid var(--rule);
+      border-radius:6px; width:34px; height:30px; cursor:pointer; font-size:14px}
+    .nav button:hover{border-color:var(--accent)}
+  }
+  @media print{ .nav{display:none} section{min-height:auto; height:auto; padding:6vh 7vw} }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<section data-n="1">
+  <h1>arangodb-data-tools-rs</h1>
+  <p class="sub"><strong>Bulk data for ArangoDB</strong> — streaming, resumable, object-store native</p>
+  <p class="sub">Import · Export · Dump · Restore · RDF</p>
+  <p class="meta">Pre-alpha · v0.1.0 · 2026-10-05</p>
+</section>
+
+<section data-n="2">
+  <p class="kicker">The problem</p>
+  <h2>The official tools assume a world we don't live in</h2>
+  <ul>
+    <li><strong>Local filesystem output.</strong> No path to S3, GCS, or Azure without staging.</li>
+    <li><strong>Blocking I/O.</strong> Memory grows with input; no explicit backpressure.</li>
+    <li><strong>Limited resumability.</strong> A failed 10-hour import starts over.</li>
+    <li><strong>Thin observability.</strong> Hard to drive from another program.</li>
+  </ul>
+  <blockquote><p>A backup that cannot stream to object storage is a backup with a staging problem.</p></blockquote>
+</section>
+
+<section data-n="3">
+  <p class="kicker">What we built</p>
+  <h2>Nine Rust crates. One CLI: <code>arangox</code></h2>
+  <table>
+    <tr><td><strong>import</strong></td><td>CSV/TSV/JSON/JSONL, bounded batching, adaptive concurrency</td></tr>
+    <tr><td><strong>export</strong></td><td>AQL cursors → JSONL/JSON/CSV, compression, size-split</td></tr>
+    <tr><td><strong>dump</strong></td><td>Replication-snapshot, manifest-driven, single-server</td></tr>
+    <tr><td><strong>restore</strong></td><td>Manifest-driven, resumable, fingerprint-bound</td></tr>
+    <tr><td><strong>rdf</strong></td><td>N-Triples/N-Quads/Turtle → property graph</td></tr>
+  </table>
+  <p>Five storage schemes behind one abstraction: <span class="accent2">local · S3 · SeaweedFS · GCS · Azure</span></p>
+</section>
+
+<section data-n="4">
+  <p class="kicker">Design bet 1</p>
+  <h2>The manifest is canonical</h2>
+  <p>Every dump and split export writes a manifest enumerating each artifact with its
+     format, compression, byte size, and checksum.</p>
+  <p class="big accent">It is written last.</p>
+  <ul>
+    <li>Restore never guesses a filename.</li>
+    <li>A truncated transfer is <em>detectably</em> incomplete, not quietly partial.</li>
+    <li>The format carries an explicit version from day one.</li>
+  </ul>
+</section>
+
+<section data-n="5">
+  <p class="kicker">Design bet 2</p>
+  <h2>Resume that works on streams</h2>
+  <p>Import checkpoints <strong>deterministic batch indices</strong>, not byte offsets.
+     Identical input + identical batching config → identical batch sequence, so a restart
+     re-derives the same batches and skips committed ones.</p>
+  <ul>
+    <li>Works for <strong>non-seekable</strong> sources — stdin, pipes, streams.</li>
+    <li>A contiguous high-water mark means concurrent out-of-order sends can never advance
+        the checkpoint past an unacknowledged batch.</li>
+    <li>Restore resumes the same way, refusing a checkpoint from a different dump by
+        manifest fingerprint.</li>
+  </ul>
+  <blockquote><p>The spec asked for byte offsets on seekable sources only. The implementation
+    is strictly more general — so we patched the spec.</p></blockquote>
+</section>
+
+<section data-n="6">
+  <p class="kicker">Design bet 3</p>
+  <h2>Fail loudly, never misbehave quietly</h2>
+  <p><code>arangox dump</code> probes the server's deployment role <strong>before</strong>
+     writing anything. Coordinator, DB-Server, or agent → refuse, naming the role.</p>
+  <blockquote><p>Cluster-aware dump is post-MVP. The single-server path cannot guarantee
+    completeness across shards — so it does not run and pretend.</p></blockquote>
+  <p>Restore refuses encrypted and VelocyPack dumps. An <em>inconclusive</em> probe warns and
+     proceeds, rather than blocking single-server users over a diagnostic call.</p>
+</section>
+
+<section data-n="7">
+  <p class="kicker">Where it stands</p>
+  <h2>275 tests pass · 0 fail · clippy clean</h2>
+  <p>CI against a live ArangoDB 3.12, weekly cross-backend matrix.
+     ~13,500 lines of Rust across 9 crates.</p>
+  <p>Audited against its own PRD, requirement by requirement:</p>
+  <table>
+    <tr><th class="num">Implemented</th><th class="num">Partial</th><th class="num">Missing</th></tr>
+    <tr><td class="num big accent2">88</td><td class="num big warn">24</td><td class="num big accent">17</td></tr>
+  </table>
+  <p>of 130 requirements. Every open gap tracked individually.</p>
+</section>
+
+<section data-n="8">
+  <p class="kicker">What the audit found</p>
+  <h2>The same defect, six times</h2>
+  <blockquote><p>A capability is implemented and unit-tested at the type layer —
+    then <strong>never called</strong> from any production path.</p></blockquote>
+  <ul>
+    <li><code>put_if_absent</code> — tested, uncalled → concurrent dumps silently overwrite</li>
+    <li>View definitions — parsed, modeled, <strong>never written</strong></li>
+    <li>Three error-context builders — uncalled</li>
+    <li>The redaction helper — uncalled</li>
+    <li>Two progress counters — always report <code>0</code></li>
+  </ul>
+  <p>Every one passes its tests. <strong>A unit test proves the unit works. It proves nothing
+     about whether anything calls it.</strong></p>
+</section>
+
+<section data-n="9">
+  <p class="kicker">The honest limitations</p>
+  <h2>Ranked by consequence, not effort</h2>
+  <ol>
+    <li><strong class="accent">Views are silently dropped from dumps.</strong> The only open
+        gap that can lose data without an error. Top priority.</li>
+    <li>No <code>arangodump</code>/<code>arangorestore</code> interop, either direction.</li>
+    <li>No typed library builders — a stated alpha criterion.</li>
+    <li>Dump is single-server only — and refuses clusters rather than guessing.</li>
+  </ol>
+  <blockquote><p>"Pre-alpha" is not a disclosure. A tracking ID and a named failure mode is.</p></blockquote>
+</section>
+
+<section data-n="10">
+  <p class="kicker">What's next</p>
+  <h2>The path to a defensible alpha</h2>
+  <table>
+    <tr><th>Priority</th><th>Work</th></tr>
+    <tr><td><strong class="accent">P0</strong></td><td>Dump and restore views; wire the six uncalled capabilities</td></tr>
+    <tr><td><strong class="warn">P1</strong></td><td>Typed library builders; <code>arangodump</code> interop (read direction first)</td></tr>
+    <tr><td><strong class="accent2">P2</strong></td><td>Resumable dump; parallel dump protocol; text-mode progress</td></tr>
+  </table>
+  <p>P0 and P1 are what stand between this and a defensible <code>v0.1.0</code> alpha tag.</p>
+</section>
+
+<section data-n="11">
+  <h2>Links</h2>
+  <p><strong>Repository</strong><br>
+     <span class="accent2">github.com/arango-solutions/arangodb-data-tools-rs</span></p>
+  <hr>
+  <p><strong>Graded audit</strong> — <code>docs/scorecard.md</code><br>
+     <strong>Status and sequencing</strong> — <code>PROJECT_STATUS_SUMMARY.md</code><br>
+     <strong>Requirements</strong> — <code>RUST_ARANGODB_TOOLS_PRD.md</code></p>
+</section>
+
+</div>
+
+<div class="nav">
+  <button id="prev" title="Previous (←)">↑</button>
+  <button id="next" title="Next (→)">↓</button>
+</div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('section'));
+  function current(){
+    var best = 0, bestD = Infinity;
+    slides.forEach(function(s,i){
+      var d = Math.abs(s.getBoundingClientRect().top);
+      if (d < bestD){ bestD = d; best = i; }
+    });
+    return best;
+  }
+  function go(n){
+    n = Math.max(0, Math.min(slides.length - 1, n));
+    slides[n].scrollIntoView({behavior:'smooth', block:'start'});
+  }
+  document.getElementById('next').onclick = function(){ go(current()+1); };
+  document.getElementById('prev').onclick = function(){ go(current()-1); };
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(current()+1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(current()-1); }
+    else if (e.key === 'Home') { e.preventDefault(); go(0); }
+    else if (e.key === 'End') { e.preventDefault(); go(slides.length-1); }
+  });
+})();
+</script>
+</body>
+</html>

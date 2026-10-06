@@ -100,7 +100,7 @@ cargo fmt --all --check
 
 ## Usage
 
-The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, `restore`, and `rdf` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--username`, `--password-env`/`--auth-token-env` (names of env vars holding the secret; secrets are never passed on the command line), `--tls-ca`, and `--insecure`.
+The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, `restore`, and `rdf` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--tls-ca`, and `--insecure`, plus one credential source — `--username` with `--password-env` (add `--auth jwt` to log in at `/_open/auth` instead of resending the password), `--jwt-secret-file`/`--jwt-secret-env` to mint a superuser JWT from the server's secret, or `--auth-token-env` for a token you already hold. Secrets are always read from a file or a named environment variable, never passed on the command line, and supplying two credential sources is an error naming both. See [`docs/authentication.md`](docs/authentication.md).
 
 ```bash
 # Build, then run via cargo (or use the compiled ./target/release/arangox)
@@ -197,12 +197,12 @@ Every subcommand accepts local paths and object-storage URIs for inputs, outputs
 
 Credentials are resolved from the environment; secrets are never passed on the command line. See [`docs/backends.md`](docs/backends.md) for per-backend setup and examples.
 
-### Machine-readable output (`--output json`)
+### Machine-readable output (`--output-format json`)
 
-For programmatic callers (e.g. driving the CLI as a subprocess from Python or Go), pass the global `--output json` flag. The result becomes a single JSON object on **stdout**, newline-delimited progress events stream on **stderr**, and errors are rendered as a JSON object on stderr with a non-zero exit code.
+For programmatic callers (e.g. driving the CLI as a subprocess from Python or Go), pass the global `--output-format json` flag. The result becomes a single JSON object on **stdout**, newline-delimited progress events stream on **stderr**, and errors are rendered as a JSON object on stderr with a non-zero exit code.
 
 ```bash
-arangox --output json import --collection users --input users.jsonl
+arangox --output-format json import --collection users --input users.jsonl
 ```
 
 stdout (the result):
@@ -219,24 +219,59 @@ stderr (newline-delimited progress; `import` emits periodic `progress` snapshots
 {"event":"finished","bytes_read":0,"bytes_written":123456,"documents":1000,"batches":10,"server_errors":0,"retries":0,"elapsed_secs":1.23}
 ```
 
-All four subcommands emit a JSON result, `started`/`finished` events, and mid-run `progress` events: `import` and single-file `export` emit time-based snapshots (~1s), while `dump`, `restore`, and split `export` emit a snapshot as each collection/part completes.
+All five subcommands emit a JSON result, `started`/`finished` events, and mid-run `progress` events: `import` and single-file `export` emit time-based snapshots (~1s), while `dump`, `restore`, and split `export` emit a snapshot as each collection/part completes.
 
 ### From Python or Go
 
 Two integration paths are supported:
 
-1. **Subprocess + `--output json`** (works for all tools today): run `arangox`, parse stdout for the result, read stderr line-by-line for progress, and use the exit code for success/failure. Language-agnostic.
+1. **Subprocess + `--output-format json`** (works for all tools today): run `arangox`, parse stdout for the result, read stderr line-by-line for progress, and use the exit code for success/failure. Language-agnostic.
 2. **Native Python bindings** (sketch): a PyO3/maturin module under [`bindings/python`](bindings/python) binds the import pipeline in-process as `arangox.import_file(...)`, returning a `dict`. See its README for build/usage.
 
 ## Documentation
 
 - [`docs/cli-reference.md`](docs/cli-reference.md) — every subcommand and flag.
+- [`docs/authentication.md`](docs/authentication.md) — basic, user-JWT, and superuser-JWT auth, and how to diagnose a 401.
 - [`docs/backends.md`](docs/backends.md) — storage schemes, credentials, troubleshooting, tuning.
 - [`docs/dump-format.md`](docs/dump-format.md) — dump/export layout and manifest schema.
 - [`docs/resume.md`](docs/resume.md) — checkpoints and restart-resumable uploads.
 - [`docs/rdf-model.md`](docs/rdf-model.md) — the RDF-to-graph mapping (PGT/RPT).
 - [`docs/benchmarks.md`](docs/benchmarks.md) — throughput baselines.
 - [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — engineering plan.
+- [`docs/scorecard.md`](docs/scorecard.md) — graded project health: what is built, what is
+  partial, what is missing, measured against the PRD.
+
+## Known limitations
+
+Pre-alpha means specific, tracked gaps — not unknown ones. These are the limits that
+change what you should use the tool for today. Each is an open item in the project's
+requirement audit (see [`docs/scorecard.md`](docs/scorecard.md)).
+
+- **Search views are not dumped or restored.** A dump captures collections, indexes,
+  and documents. ArangoSearch and `search-alias` view definitions are **omitted
+  without warning**, so restoring a dump yields a database with no views. If your
+  database depends on views, `arangox dump` is not yet a complete backup of it — use
+  ArangoDB's `arangodump` alongside it, or recreate views from your own schema
+  definitions after a restore.
+- **No interoperability with `arangodump`/`arangorestore` yet.** The project manifest
+  format is canonical and self-describing, but neither direction of compatibility is
+  implemented: this tool cannot read an official `arangodump` directory, and official
+  `arangorestore` cannot read a dump this tool produces. Treat the two toolchains as
+  separate backup systems.
+- **Enterprise-encrypted dumps are detected only by manifest, not by marker file.**
+  A dump whose manifest declares encryption is refused with a clear error, but
+  ArangoDB's on-disk `ENCRYPTION` marker file is not yet read, so an encrypted
+  *official* dump directory is not recognized as encrypted.
+- **Dump is single-server only.** `arangox dump` checks the server's deployment role
+  and refuses a cluster coordinator, DB-Server, or agent by name rather than
+  producing a dump of unverified completeness.
+- **The library API is function-based, not builder-based.** Only `ArangoClient` has a
+  typed builder; import, export, dump, and restore are invoked as functions taking
+  option structs. The builder API named in the PRD is not built yet, so library-level
+  call sites will change before 1.0.
+- **Restore ordering is partial.** Document collections are restored before edge
+  collections, but `distributeShardsLike` prototype ordering and system-collection
+  ordering (`_analyzers` first, `_users` last) are not implemented.
 
 ## Compatibility
 
