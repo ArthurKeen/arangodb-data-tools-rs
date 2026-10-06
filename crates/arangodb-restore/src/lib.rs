@@ -90,6 +90,8 @@ pub struct RestoreSummary {
     pub restored: usize,
     /// Number of collections skipped because a checkpoint marked them done.
     pub skipped: usize,
+    /// Number of views created by this invocation.
+    pub views: usize,
 }
 
 /// Restores a dump from `store` into the database the `client` is connected to.
@@ -144,6 +146,9 @@ pub async fn run_restore_with_progress(
         (db_index, i64::from(structure.is_edge))
     });
 
+    // Views are restored in two passes around the data load (PRD §8.5).
+    let views = read_views(store, &manifest).await?;
+
     let multi_db = units.iter().any(|(group, _)| group.database.is_some());
 
     // Create target databases up front (create_database is idempotent).
@@ -171,75 +176,156 @@ pub async fn run_restore_with_progress(
         None => RestoreCheckpoint::new(fingerprint.clone()),
     };
 
+    let resuming = options.checkpoint.is_some();
+    let done = |checkpoint: &RestoreCheckpoint, id: &str| resuming && checkpoint.contains(id);
+
     let total = units.len();
     let mut restored: usize = 0;
     let mut skipped: usize = 0;
-    let mut done: u64 = 0;
+    let mut views_restored: usize = 0;
+    let mut progressed: u64 = 0;
+
+    // Phase 1 — create every collection, before any view is created.
+    //
+    // An arangosearch view whose links name a missing collection is refused
+    // with error 1203, so every target must exist first. Collections already
+    // recorded complete are skipped: recreating one here would truncate data a
+    // previous run finished loading.
+    for (group, structure) in &units {
+        if done(&checkpoint, &unit_id(group)) {
+            continue;
+        }
+        let db_client = unit_client(client, group, options);
+        db_client
+            .restore_collection(&structure.parameters, &[], options.overwrite)
+            .await?;
+    }
+
+    // Phase 2 — arangosearch views, before data.
+    //
+    // Links present during the load index documents as they arrive, which
+    // costs load throughput but avoids a separate indexing pass afterwards
+    // (PRD §8.5 records the tradeoff).
+    for view in views.iter().filter(|v| !v.is_search_alias()) {
+        let id = view_unit_id(view);
+        if done(&checkpoint, &id) {
+            continue;
+        }
+        restore_view(client, view, options).await?;
+        views_restored += 1;
+        record(&mut checkpoint, options, id).await;
+    }
+
+    // Phase 3 — data, then indexes, per collection.
     for (group, structure) in &units {
         let id = unit_id(group);
-        if options.checkpoint.is_some() && checkpoint.contains(&id) {
+        if done(&checkpoint, &id) {
             skipped += 1;
-            done += 1;
+            progressed += 1;
             continue;
         }
 
-        // A per-database client for multi-DB dumps; otherwise the target DB
-        // (a create-database override or the client's own database).
-        let db_client = match &group.database {
-            Some(database) => client.with_database(database),
-            None => match &options.create_database {
-                Some(target) => client.with_database(target),
-                None => client.with_database(client.database()),
-            },
-        };
-
-        restore_collection(
-            &db_client,
-            store,
-            group,
-            structure,
-            options.overwrite,
-            &manifest,
-        )
-        .await?;
+        let db_client = unit_client(client, group, options);
+        load_collection_data(&db_client, store, group, structure, &manifest).await?;
         restored += 1;
-        done += 1;
+        progressed += 1;
 
-        if let Some(config) = &options.checkpoint {
-            checkpoint.completed.push(id);
-            persist_restore_checkpoint(config, &checkpoint).await;
-        }
+        record(&mut checkpoint, options, id).await;
         if let Some(sink) = &progress {
             sink.emit(&ProgressEvent::Progress(ProgressSnapshot {
-                batches: done,
+                batches: progressed,
                 elapsed_secs: started.elapsed().as_secs_f64(),
                 ..ProgressSnapshot::default()
             }));
         }
     }
 
+    // Phase 4 — search-alias views, after data and indexes.
+    //
+    // They name inverted indexes by collection and index name, and those
+    // indexes are built in phase 3; creating one earlier is refused with a 400.
+    for view in views.iter().filter(|v| v.is_search_alias()) {
+        let id = view_unit_id(view);
+        if done(&checkpoint, &id) {
+            continue;
+        }
+        restore_view(client, view, options).await?;
+        views_restored += 1;
+        record(&mut checkpoint, options, id).await;
+    }
+
     Ok(RestoreSummary {
         collections: total,
         restored,
         skipped,
+        views: views_restored,
     })
 }
 
-/// Restores a single collection: create it, load its data parts, then build its
-/// non-implicit indexes.
-async fn restore_collection(
+/// The client to use for one collection group: its own database for multi-DB
+/// dumps, otherwise the create-database override or the client's own database.
+fn unit_client(
+    client: &ArangoClient,
+    group: &CollectionGroup,
+    options: &RestoreOptions,
+) -> ArangoClient {
+    match &group.database {
+        Some(database) => client.with_database(database),
+        None => match &options.create_database {
+            Some(target) => client.with_database(target),
+            None => client.with_database(client.database()),
+        },
+    }
+}
+
+/// Records a completed unit in the checkpoint, when one is configured.
+async fn record(checkpoint: &mut RestoreCheckpoint, options: &RestoreOptions, id: String) {
+    if let Some(config) = &options.checkpoint {
+        checkpoint.completed.push(id);
+        persist_restore_checkpoint(config, checkpoint).await;
+    }
+}
+
+/// Creates one view, dropping any existing one first when overwriting.
+async fn restore_view(
+    client: &ArangoClient,
+    view: &ViewArtifact,
+    options: &RestoreOptions,
+) -> Result<()> {
+    let db_client = match &view.database {
+        Some(database) => client.with_database(database),
+        None => match &options.create_database {
+            Some(target) => client.with_database(target),
+            None => client.with_database(client.database()),
+        },
+    };
+    if options.overwrite {
+        db_client.drop_view(&view.name).await?;
+    }
+    db_client
+        .create_view(&view.definition)
+        .await
+        .map_err(|err| {
+            Error::config(format!(
+                "failed to create view '{}': {err}. A view's target collections must exist \
+             before it is created; if the dump was taken with collection filters, the \
+             view's targets may not be in it.",
+                view.name
+            ))
+        })
+}
+
+/// Loads a collection's data parts, then builds its non-implicit indexes.
+///
+/// The collection itself is created earlier, in phase 1, so that every
+/// arangosearch view can be created before any data is loaded.
+async fn load_collection_data(
     client: &ArangoClient,
     store: &dyn ObjectStore,
     group: &CollectionGroup,
     structure: &Structure,
-    overwrite: bool,
     manifest: &Manifest,
 ) -> Result<()> {
-    // Create the collection without indexes; restore-collection does not build
-    // secondary indexes, so they are created explicitly after data.
-    client
-        .restore_collection(&structure.parameters, &[], overwrite)
-        .await?;
     for data_path in &group.data_paths {
         let body = read_data(store, data_path, manifest).await?;
         client.restore_data(&group.name, body).await?;
@@ -254,6 +340,73 @@ async fn restore_collection(
         client.create_index(&group.name, index).await?;
     }
     Ok(())
+}
+
+/// A view definition read from the dump.
+struct ViewArtifact {
+    name: String,
+    database: Option<String>,
+    definition: Value,
+}
+
+impl ViewArtifact {
+    /// Whether this is a `search-alias` view, which must be created after data
+    /// and indexes rather than before.
+    fn is_search_alias(&self) -> bool {
+        self.definition.get("type").and_then(Value::as_str) == Some("search-alias")
+    }
+}
+
+/// The checkpoint identifier for a view: `"{database}::view::{name}"`.
+///
+/// Collection names cannot contain `:` in ArangoDB, so this can never collide
+/// with a collection's `"{database}::{collection}"` identifier.
+fn view_unit_id(view: &ViewArtifact) -> String {
+    format!(
+        "{}::view::{}",
+        view.database.as_deref().unwrap_or(""),
+        view.name
+    )
+}
+
+/// Reads every view artifact named in the manifest, preserving manifest order.
+async fn read_views(store: &dyn ObjectStore, manifest: &Manifest) -> Result<Vec<ViewArtifact>> {
+    let mut views = Vec::new();
+    for artifact in &manifest.artifacts {
+        if artifact.kind != ArtifactKind::View {
+            continue;
+        }
+        let bytes = read_object(
+            store,
+            &ObjectPath::new(artifact.path.clone()),
+            Compression::None,
+        )
+        .await?;
+        let definition: Value = serde_json::from_slice(&bytes)?;
+        // Prefer the manifest's name, falling back to the definition's own so a
+        // hand-assembled manifest still restores.
+        let name = artifact
+            .view
+            .clone()
+            .or_else(|| {
+                definition
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                Error::config(format!(
+                    "view artifact '{}' has no name in the manifest or its definition",
+                    artifact.path
+                ))
+            })?;
+        views.push(ViewArtifact {
+            name,
+            database: artifact.database.clone(),
+            definition,
+        });
+    }
+    Ok(views)
 }
 
 /// The stable per-collection identifier used in the resume checkpoint:
@@ -463,6 +616,7 @@ mod tests {
             byte_size: 1,
             checksum: None,
             collection: Some("c".to_string()),
+            view: None,
             database: None,
             part: Some(0),
         }
@@ -500,6 +654,7 @@ mod tests {
             byte_size: 1,
             checksum: None,
             collection: Some("c".to_string()),
+            view: None,
             database: None,
             part: None,
         });
@@ -524,6 +679,7 @@ mod tests {
             byte_size: 1,
             checksum: None,
             collection: Some(collection.to_string()),
+            view: None,
             database: Some(db.to_string()),
             part: (kind == ArtifactKind::Data).then_some(0),
         }

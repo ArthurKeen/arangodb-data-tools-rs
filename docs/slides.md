@@ -113,7 +113,7 @@ The same defect, six times:
 > then **never called** from any production path.
 
 - `put_if_absent` — tested, uncalled → concurrent dumps silently overwrite
-- View definitions — parsed, modeled, **never written**
+- View definitions — parsed, modeled, never written *(now fixed)*
 - Three error-context builders — uncalled
 - The redaction helper — uncalled
 - Two progress counters — always report `0`
@@ -127,8 +127,8 @@ about whether anything calls it.**
 
 Ranked by consequence, not effort:
 
-1. **Views are silently dropped from dumps.** The only open gap that can lose data
-   without an error. Top priority.
+1. **Custom analyzers are not dumped.** A view using one restores *without error*,
+   then fails at query time. The narrowest remaining correctness gap.
 2. **No `arangodump`/`arangorestore` interop**, either direction.
 3. **No typed library builders** — a stated alpha criterion.
 4. **Dump is single-server only** — and refuses clusters rather than guessing.
@@ -141,7 +141,7 @@ Ranked by consequence, not effort:
 
 | Priority | Work |
 |---|---|
-| **P0** | Dump and restore views; wire the six uncalled capabilities |
+| **P0** | ~~Dump and restore views~~ **done**; custom analyzers; wire the uncalled capabilities |
 | **P1** | Typed library builders; `arangodump` interop (read direction first) |
 | **P2** | Resumable dump; parallel dump protocol; text-mode progress |
 

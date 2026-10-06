@@ -80,8 +80,8 @@ This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATI
 | `arangodb-storage` | `ObjectStore` abstraction: local FS, S3-compatible, GCS, and Azure (via `object_store`), plus URI parsing and compression | Local FS + S3/GCS/Azure |
 | `arangodb-import` | Streaming bulk import (CSV/TSV/JSON/JSONL) with bounded batching and resumable checkpointing | Implemented |
 | `arangodb-export` | Export via AQL cursors (JSONL/JSON/CSV), with optional size-split JSONL + manifest | Implemented |
-| `arangodb-dump` | Database dump (manifest-driven) | Implemented |
-| `arangodb-restore` | Database restore from a dump | Implemented |
+| `arangodb-dump` | Database dump (manifest-driven), including search views | Implemented |
+| `arangodb-restore` | Database restore from a dump, including search views | Implemented |
 | `arangodb-rdf` | RDF bulk import into a property graph (N-Triples, N-Quads, Turtle) | Implemented |
 | `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore`, `rdf` subcommands | Implemented |
 
@@ -247,12 +247,13 @@ Pre-alpha means specific, tracked gaps — not unknown ones. These are the limit
 change what you should use the tool for today. Each is an open item in the project's
 requirement audit (see [`docs/scorecard.md`](docs/scorecard.md)).
 
-- **Search views are not dumped or restored.** A dump captures collections, indexes,
-  and documents. ArangoSearch and `search-alias` view definitions are **omitted
-  without warning**, so restoring a dump yields a database with no views. If your
-  database depends on views, `arangox dump` is not yet a complete backup of it — use
-  ArangoDB's `arangodump` alongside it, or recreate views from your own schema
-  definitions after a restore.
+- **Custom analyzers are not dumped, and a view that uses one restores broken.**
+  Search views themselves round-trip, but analyzers live in the `_analyzers`
+  system collection and are not captured. A view referencing a custom analyzer
+  restores **without any error** — ArangoDB accepts the analyzer definitions
+  embedded in the view's links — yet querying it fails with `Unable to look up
+  analyzer '<name>'`. Views using only built-in analyzers are unaffected.
+  Recreate custom analyzers on the target before restoring.
 - **No interoperability with `arangodump`/`arangorestore` yet.** The project manifest
   format is canonical and self-describing, but neither direction of compatibility is
   implemented: this tool cannot read an official `arangodump` directory, and official

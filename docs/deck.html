@@ -149,7 +149,7 @@
     then <strong>never called</strong> from any production path.</p></blockquote>
   <ul>
     <li><code>put_if_absent</code> — tested, uncalled → concurrent dumps silently overwrite</li>
-    <li>View definitions — parsed, modeled, <strong>never written</strong></li>
+    <li>View definitions — parsed, modeled, never written <em>(now fixed)</em></li>
     <li>Three error-context builders — uncalled</li>
     <li>The redaction helper — uncalled</li>
     <li>Two progress counters — always report <code>0</code></li>
@@ -162,8 +162,9 @@
   <p class="kicker">The honest limitations</p>
   <h2>Ranked by consequence, not effort</h2>
   <ol>
-    <li><strong class="accent">Views are silently dropped from dumps.</strong> The only open
-        gap that can lose data without an error. Top priority.</li>
+    <li><strong class="accent">Custom analyzers are not dumped.</strong> A view using one
+        restores <em>without error</em>, then fails at query time. The narrowest remaining
+        correctness gap.</li>
     <li>No <code>arangodump</code>/<code>arangorestore</code> interop, either direction.</li>
     <li>No typed library builders — a stated alpha criterion.</li>
     <li>Dump is single-server only — and refuses clusters rather than guessing.</li>
@@ -176,7 +177,7 @@
   <h2>The path to a defensible alpha</h2>
   <table>
     <tr><th>Priority</th><th>Work</th></tr>
-    <tr><td><strong class="accent">P0</strong></td><td>Dump and restore views; wire the six uncalled capabilities</td></tr>
+    <tr><td><strong class="accent">P0</strong></td><td>Views <em>done</em>; custom analyzers; wire the uncalled capabilities</td></tr>
     <tr><td><strong class="warn">P1</strong></td><td>Typed library builders; <code>arangodump</code> interop (read direction first)</td></tr>
     <tr><td><strong class="accent2">P2</strong></td><td>Resumable dump; parallel dump protocol; text-mode progress</td></tr>
   </table>

@@ -70,8 +70,13 @@ pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
     reporter.result(
         || {
             format!(
-                "restored {} of {} collection(s) into '{}' ({} skipped from checkpoint)",
-                summary.restored, summary.collections, args.connection.database, summary.skipped
+                "restored {} of {} collection(s) and {} view(s) into '{}' \
+                 ({} skipped from checkpoint)",
+                summary.restored,
+                summary.collections,
+                summary.views,
+                args.connection.database,
+                summary.skipped
             )
         },
         || {
@@ -82,6 +87,7 @@ pub(crate) async fn run(args: RestoreArgs, reporter: Reporter) -> Result<()> {
                 "collections": summary.collections,
                 "restored": summary.restored,
                 "skipped": summary.skipped,
+                "views": summary.views,
             })
         },
     );

@@ -1,6 +1,6 @@
 # ArangoDB Data Tools (Rust) — Project Status Summary
 
-**Status:** Phases 0–7 complete. Pre-alpha, version `0.1.0`, no release tagged.
+**Status:** Phases 0–7 complete; search-view dump/restore landed 2026-10-05. Pre-alpha, version `0.1.0`, no release tagged.
 **Last updated:** 2026-10-05 (commit `a66988c`).
 
 For graded project health and the full gap analysis, see [`docs/scorecard.md`](docs/scorecard.md).
@@ -41,7 +41,7 @@ gaps — 17 missing, 24 partial** — out of 130 requirements. Ranked by consequ
 
 | Item | Requirements | Why it ranks here |
 |------|------|------|
-| **Dump and restore views** | REQ-038, REQ-058 | ArangoSearch and `search-alias` definitions are parsed from the inventory and then dropped. A dump of a view-using database is silently incomplete — the only open gap that loses data without an error. |
+| **Dump and restore custom analyzers** | REQ-056-adjacent | Views now round-trip (REQ-038/058 closed), but analyzers live in `_analyzers` and are not captured. A view referencing one restores *without error* and then fails at query time. |
 | **Read the `ENCRYPTION` marker** | REQ-078 | Encryption is detected only via the manifest, which an official ArangoDB dump directory does not carry. |
 | **Restore dependency ordering** | REQ-056 | `distributeShardsLike` prototypes, `_analyzers` first, `_users` last. Restoring `_users` mid-run can invalidate the running credentials. |
 | **Wire the built-but-uncalled capabilities** | REQ-076, REQ-087, REQ-105, REQ-124 | `put_if_absent`, three `ErrorContext` builders, the redaction helper, and two progress counters are each implemented, tested, and called from nowhere. Concurrent dumps to one prefix currently overwrite each other silently. |
@@ -71,9 +71,10 @@ gaps — 17 missing, 24 partial** — out of 130 requirements. Ranked by consequ
 
 ## Recommended sequence
 
-1. **Views (REQ-038/058).** Highest consequence, self-contained, and the only item that
-   changes whether a dump can be trusted as a backup.
-2. **The uncalled-capability sweep.** Mostly wiring, closes a disproportionate share of the
+1. ~~**Views (REQ-038/058).**~~ **Done** — views dump and restore in the server-mandated
+   two-pass order, verified by a round-trip that queries the restored view.
+2. **Custom analyzers**, the remaining correctness gap in backup completeness.
+3. **The uncalled-capability sweep.** Mostly wiring, closes a disproportionate share of the
    partial requirements, and removes the silent concurrent-dump overwrite.
 3. **Typed builders (REQ-112).** Clears the last §21 alpha criterion and stabilizes the
    library surface before anyone depends on it.

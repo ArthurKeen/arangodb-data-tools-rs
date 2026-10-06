@@ -85,6 +85,11 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
         .iter()
         .filter(|a| a.kind == arangodb_tools_core::manifest::ArtifactKind::Data)
         .count();
+    let views = manifest
+        .artifacts
+        .iter()
+        .filter(|a| a.kind == arangodb_tools_core::manifest::ArtifactKind::View)
+        .count();
     let artifacts = manifest.artifacts.len();
 
     reporter.finished(ProgressSnapshot {
@@ -95,7 +100,8 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
     reporter.result(
         || {
             format!(
-                "dumped {collections} collection(s) to '{}' ({artifacts} artifact(s) + manifest)",
+                "dumped {collections} collection(s) and {views} view(s) to '{}' \
+                 ({artifacts} artifact(s) + manifest)",
                 args.output
             )
         },
@@ -105,6 +111,7 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
                 "status": "ok",
                 "output": args.output,
                 "collections": collections,
+                "views": views,
                 "artifacts": artifacts,
             })
         },

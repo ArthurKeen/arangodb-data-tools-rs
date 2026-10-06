@@ -9,24 +9,25 @@ _Method: full requirement audit of `RUST_ARANGODB_TOOLS_PRD.md`
 mechanically against the source), plus a live `cargo test --workspace` /
 `cargo clippy -- -D warnings` run on commit `a66988c`._
 
-## Overall: **B+ / the core is solid and honestly scoped; the gaps are in breadth, not in foundations**
+## Overall: **A− / the core is solid and honestly scoped; the gaps are in breadth, not in foundations**
 
 Four data pipelines — import, export, dump, restore — plus an RDF loader and a five-scheme
 storage abstraction are built, tested, and documented. The engineering discipline is real:
 **275 tests pass, zero fail, clippy is clean under `-D warnings`**, and CI runs against a live
 ArangoDB 3.12 service with a weekly cross-backend matrix.
 
-What keeps this short of an alpha is not instability. It is **coverage breadth and one silent
-data-loss gap**: search views are parsed out of the replication inventory and then dropped,
-so a dump is not a complete backup of a database that uses them, and nothing says so at run
-time. That single defect matters more than the other forty gaps combined, because every other
-known limit either fails loudly or is visible in the output.
+What keeps this short of an alpha is coverage breadth, not instability. The silent data-loss
+gap that dominated the August audit — search views parsed out of the inventory and then
+dropped — is closed: views now dump and restore, in the two passes the server's own ordering
+rules require, verified by a round-trip that queries the restored view rather than merely
+checking it exists. What remains in that area is narrower and documented: custom analyzers are
+not captured, so a view that uses one restores without error and then fails at query time.
 
 | Dimension | Grade | One-line |
 |---|---|---|
 | PRD requirement coverage | B+ | 88 of 130 implemented; 24 partial, 17 missing, 1 explicitly out of scope |
 | Core pipeline correctness | A− | Bounded backpressure, deterministic batch-index resume, manifest-last writes; dump refuses clusters by role |
-| Backup completeness | **C** | **Views are silently omitted from every dump** — the one gap that can lose data without telling you |
+| Backup completeness | B+ | Collections, indexes, data and search views all round-trip. Custom analyzers are not dumped, so a view using one restores without error but cannot be queried |
 | Interoperability | D | Neither direction of `arangodump`/`arangorestore` compatibility exists; honestly disclosed, but a headline PRD goal |
 | Engineering quality | A | 275 tests green, clippy clean at `-D warnings`, live-server CI, 13.5k lines of Rust across 9 crates |
 | Observability | B | Structured JSON results and NDJSON progress on all five subcommands; two counters are wired to nothing and always report `0` |
@@ -88,10 +89,10 @@ environment variables and never from the command line.
 
 Ranked by consequence rather than by effort.
 
-1. **Views are dropped from dumps and restores.** The replication inventory's `views` array is
-   parsed into the client model and `ArtifactKind::View` is defined in the manifest schema —
-   and neither is ever written or read. A database with ArangoSearch views dumps and restores
-   without them, silently. This is the one open gap that can cost data without an error.
+1. **Custom analyzers are not dumped.** Views round-trip, but an analyzer a view references
+   does not. The view restores without error — ArangoDB accepts the definitions embedded in
+   its links — and then fails at query time with `Unable to look up analyzer`. This is now the
+   narrowest remaining correctness gap in backup completeness.
 2. **No `arangodump`/`arangorestore` interoperability.** Reading official dumps, producing the
    conventional on-disk layout, writing `dump.json`-style metadata, and both compatibility
    test directions are all absent. The PRD scopes this as best-effort, and the README says

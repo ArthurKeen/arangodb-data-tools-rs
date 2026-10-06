@@ -299,6 +299,7 @@ async fn write_part(
         byte_size: written.size,
         checksum: Some(checksum),
         collection: None,
+        view: None,
         database: None,
         part: Some(part),
     });

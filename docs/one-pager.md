@@ -68,9 +68,9 @@ rather than rolled into a backlog number.
 Three limits are worth stating plainly, because they decide what the tool is safe to use for
 today:
 
-- **Search views are not dumped or restored.** View definitions are read from the replication
-  inventory and then dropped, so a dump of a view-using database is silently incomplete. This
-  is the project's top-priority defect.
+- **Custom analyzers are not dumped.** Collections, indexes, data and search views all
+  round-trip; an analyzer a view references does not, so such a view restores without error
+  and then fails at query time.
 - **No interoperability with `arangodump`/`arangorestore` in either direction.** The two
   toolchains are, for now, separate backup systems.
 - **Dump is single-server only**, and says so by refusing clusters rather than by producing

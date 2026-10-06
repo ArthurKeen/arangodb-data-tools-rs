@@ -341,6 +341,10 @@ async fn dump_db_into_manifest(
         .replication_inventory(batch, options.include_system)
         .await?;
 
+    // Names actually written, so a view targeting a filtered-out collection
+    // can be reported rather than dumped into an unrestorable state.
+    let mut dumped: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for collection in &inventory.collections {
         if collection.is_system() && !options.include_system {
             continue;
@@ -375,9 +379,107 @@ async fn dump_db_into_manifest(
         )
         .await?;
 
+        dumped.insert(name.clone());
         progress.collection_done(data_bytes(manifest));
     }
+
+    write_views_with_prefix(
+        store,
+        path_prefix,
+        database,
+        &inventory,
+        &dumped,
+        progress.sink,
+        manifest,
+    )
+    .await?;
+
     Ok(())
+}
+
+/// Writes each view definition as its own artifact.
+///
+/// A view is skipped when any collection it targets is absent from this dump,
+/// because restoring it would fail: an `arangosearch` view whose links name a
+/// missing collection is refused with error 1203, and a `search-alias` view
+/// whose index is missing with a 400. That only happens under collection
+/// filters, and it is reported as a warning naming the view and the missing
+/// collection rather than dropped silently — an incomplete dump the user
+/// cannot see is the failure mode this whole path exists to avoid.
+async fn write_views_with_prefix(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    database: Option<&str>,
+    inventory: &arangodb_client::Inventory,
+    dumped: &std::collections::HashSet<String>,
+    sink: Option<&dyn ProgressSink>,
+    manifest: &mut Manifest,
+) -> Result<()> {
+    for view in &inventory.views {
+        let Some(name) = view.get("name").and_then(serde_json::Value::as_str) else {
+            return Err(Error::config("inventory view is missing a name"));
+        };
+
+        let missing: Vec<&str> = view_targets(view)
+            .into_iter()
+            .filter(|target| !dumped.contains(*target))
+            .collect();
+        if !missing.is_empty() {
+            let message = format!(
+                "view '{name}' was not dumped: it targets collection(s) {} which the \
+                 collection filters excluded. Restoring it would fail, so it is omitted. \
+                 Widen --include-collections (or drop --exclude-collections) to capture it.",
+                missing.join(", ")
+            );
+            tracing::warn!(view = %name, missing = ?missing, "view skipped: targets not in dump");
+            if let Some(sink) = sink {
+                sink.emit(&ProgressEvent::Warning { message });
+            }
+            continue;
+        }
+
+        let bytes = serde_json::to_vec_pretty(view)?;
+        let path = format!("{prefix}{name}.view.json");
+        let meta = store
+            .put_stream(&ObjectPath::new(path.clone()), once(Bytes::from(bytes)))
+            .await?;
+        manifest.push(Artifact {
+            path,
+            kind: ArtifactKind::View,
+            format: DataFormat::Json,
+            compression: ManifestCompression::None,
+            byte_size: meta.size,
+            checksum: None,
+            collection: None,
+            view: Some(name.to_string()),
+            database: database.map(str::to_string),
+            part: None,
+        });
+    }
+    Ok(())
+}
+
+/// The collections a view definition depends on.
+///
+/// `arangosearch` views key their `links` object by collection name;
+/// `search-alias` views list `{collection, index}` entries. Both forms are
+/// read, so an unrecognized shape simply reports no targets rather than
+/// guessing.
+fn view_targets(view: &serde_json::Value) -> Vec<&str> {
+    let mut targets = Vec::new();
+    if let Some(links) = view.get("links").and_then(serde_json::Value::as_object) {
+        targets.extend(links.keys().map(String::as_str));
+    }
+    if let Some(indexes) = view.get("indexes").and_then(serde_json::Value::as_array) {
+        targets.extend(
+            indexes
+                .iter()
+                .filter_map(|i| i.get("collection").and_then(serde_json::Value::as_str)),
+        );
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    targets
 }
 
 /// Writes a collection's structure (`parameters` + `indexes`) artifact under
@@ -407,6 +509,7 @@ async fn write_structure_with_prefix(
         byte_size: meta.size,
         checksum: None,
         collection: Some(name.to_string()),
+        view: None,
         database: database.map(str::to_string),
         part: None,
     });
@@ -461,6 +564,7 @@ async fn write_data_with_prefix(
             value: hex(&digest),
         }),
         collection: Some(name.to_string()),
+        view: None,
         database: database.map(str::to_string),
         part: Some(0),
     });
@@ -531,6 +635,46 @@ fn map_compression(compression: Compression) -> ManifestCompression {
 
 #[cfg(test)]
 mod tests {
+    /// `arangosearch` views key `links` by collection name.
+    #[test]
+    fn view_targets_reads_arangosearch_links() {
+        let view = serde_json::json!({
+            "name": "v", "type": "arangosearch",
+            "links": {"docs": {"includeAllFields": true}, "more": {}}
+        });
+        assert_eq!(view_targets(&view), vec!["docs", "more"]);
+    }
+
+    /// `search-alias` views name their targets inside `indexes`.
+    #[test]
+    fn view_targets_reads_search_alias_indexes() {
+        let view = serde_json::json!({
+            "name": "v", "type": "search-alias",
+            "indexes": [{"collection": "docs", "index": "inv1"},
+                        {"collection": "other", "index": "inv2"}]
+        });
+        assert_eq!(view_targets(&view), vec!["docs", "other"]);
+    }
+
+    /// The same collection named twice is reported once, so a skip message
+    /// does not repeat it.
+    #[test]
+    fn view_targets_deduplicates() {
+        let view = serde_json::json!({
+            "indexes": [{"collection": "docs", "index": "a"},
+                        {"collection": "docs", "index": "b"}]
+        });
+        assert_eq!(view_targets(&view), vec!["docs"]);
+    }
+
+    /// An unrecognized shape reports no targets rather than guessing, so such
+    /// a view is dumped rather than silently skipped.
+    #[test]
+    fn view_targets_is_empty_for_an_unknown_shape() {
+        assert!(view_targets(&serde_json::json!({"name": "v"})).is_empty());
+        assert!(view_targets(&serde_json::json!({"links": "not-an-object"})).is_empty());
+    }
+
     use super::*;
 
     #[test]

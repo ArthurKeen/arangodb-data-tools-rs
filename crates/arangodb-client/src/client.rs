@@ -481,6 +481,73 @@ impl ArangoClient {
         Ok(())
     }
 
+    /// Drops a database, ignoring a 404 so the call is idempotent.
+    ///
+    /// Always issued against `_system`, which is the only database from which
+    /// databases may be dropped.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails for any reason other than the
+    /// database being absent.
+    pub async fn drop_database(&self, name: &str) -> Result<()> {
+        let url = self
+            .base
+            .join(&format!("/_db/_system/_api/database/{name}"))
+            .map_err(|err| Error::config(format!("invalid database URL: {err}")))?;
+        let request = self
+            .apply_auth(self.http.request(Method::DELETE, url))
+            .await?;
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        let status = response.status();
+        let payload = response.bytes().await.map_err(map_reqwest_error)?;
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        let message = arango_error_message(payload.as_ref()).unwrap_or_else(|| status.to_string());
+        Err(Error::http(status.as_u16(), message, ErrorContext::new()))
+    }
+
+    /// Creates a view from a definition as returned by the replication
+    /// inventory.
+    ///
+    /// `id` and `globallyUniqueId` are stripped before the request. The server
+    /// always assigns a fresh `id`, but it **honors a supplied
+    /// `globallyUniqueId`** (verified on 3.12.4), so leaving one in would carry
+    /// the source server's identifier onto a different deployment.
+    ///
+    /// Ordering matters and is the caller's responsibility: an `arangosearch`
+    /// view whose links name a missing collection is refused with error 1203,
+    /// and a `search-alias` view whose inverted index does not yet exist is
+    /// refused with a 400.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails after retries.
+    pub async fn create_view(&self, definition: &serde_json::Value) -> Result<()> {
+        let mut body = definition.clone();
+        if let Some(object) = body.as_object_mut() {
+            object.remove("id");
+            object.remove("globallyUniqueId");
+        }
+        let payload = serde_json::to_vec(&body)?;
+        self.execute(Method::POST, "/_api/view", Some(&payload))
+            .await?;
+        Ok(())
+    }
+
+    /// Drops a view, ignoring a 404 so the call is idempotent.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails for any reason other than the
+    /// view being absent.
+    pub async fn drop_view(&self, name: &str) -> Result<()> {
+        let path = format!("/_api/view/{name}");
+        match self.execute(Method::DELETE, &path, None).await {
+            Ok(_) => Ok(()),
+            Err(Error::Http { status: 404, .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Drops a collection.
     ///
     /// # Errors

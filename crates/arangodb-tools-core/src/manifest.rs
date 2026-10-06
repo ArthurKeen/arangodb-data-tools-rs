@@ -200,8 +200,16 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<Checksum>,
     /// The collection this artifact belongs to, if applicable.
+    ///
+    /// View artifacts leave this `None` and set [`Artifact::view`] instead: a
+    /// view is not a collection, and restore groups collection artifacts by
+    /// this field, so naming a view here would fabricate a collection with no
+    /// structure artifact and fail the restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
+    /// The view this artifact defines, for [`ArtifactKind::View`] entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
     /// The source database this artifact belongs to, for multi-database dumps.
     /// `None` means the dump is single-database and restores into the target
     /// database chosen at restore time.
@@ -312,6 +320,7 @@ mod tests {
                 value: "deadbeef".to_owned(),
             }),
             collection: Some("users".to_owned()),
+            view: None,
             database: None,
             part: Some(0),
         });

@@ -39,6 +39,7 @@ manifest.push(Artifact {
     byte_size: 1024,
     checksum: None,
     collection: Some("users".to_string()),
+    view: None,
     database: None,
     part: Some(0),
 });

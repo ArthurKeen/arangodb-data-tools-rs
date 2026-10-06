@@ -14,6 +14,7 @@ A single-database dump root contains:
 dump.manifest.json                 # canonical manifest (written last)
 <collection>.structure.json        # parameters + index definitions
 <collection>.data.jsonl[.gz|.zst]  # replication dump markers (data)
+<view>.view.json                   # search view definition
 ```
 
 The manifest is always written **last**, so its presence signals a complete
@@ -29,6 +30,7 @@ prefix and described by one combined manifest at the root:
 dump.manifest.json                 # combined; each artifact carries "database"
 databases/<db1>/<collection>.structure.json
 databases/<db1>/<collection>.data.jsonl
+databases/<db1>/<view>.view.json
 databases/<db2>/<collection>.structure.json
 ...
 ```
@@ -36,6 +38,41 @@ databases/<db2>/<collection>.structure.json
 Each artifact records its source `database`; restore recreates and targets each
 database from the manifest. A single-database dump omits `database` on its
 artifacts and restores into the database chosen at restore time.
+
+### Search views
+
+Every ArangoSearch and `search-alias` view in the database is written verbatim
+as `<view>.view.json`, exactly as the replication inventory reports it, and
+recorded in the manifest with `kind: "view"` and the view's name in `view`.
+
+Restore recreates views in two passes around the data load, because the server
+enforces the ordering:
+
+1. **Collections are created** (no data yet).
+2. **`arangosearch` views are created.** Their `links` name target collections,
+   and a link to a missing collection is refused with error 1203. Creating them
+   before the load means documents are indexed as they arrive, rather than
+   needing a separate indexing pass — at some cost to load throughput, which is
+   the tradeoff PRD §8.5 records.
+3. **Data is loaded, then indexes are built.**
+4. **`search-alias` views are created.** They name inverted indexes by
+   collection and index name, so they cannot exist until step 3 has built those
+   indexes; attempting it earlier is refused with a 400.
+
+`id` and `globallyUniqueId` are stripped before a view is created. The server
+assigns a fresh `id` regardless, but it *honors* a supplied `globallyUniqueId`,
+which would otherwise carry the source server's identifier onto the target.
+
+Two limits apply:
+
+- **Custom analyzers are not dumped.** They live in the `_analyzers` system
+  collection. A view that references one restores **without error**, because
+  ArangoDB accepts the analyzer definitions embedded in the view's links, but
+  querying it then fails with `Unable to look up analyzer '<name>'`. Recreate
+  custom analyzers on the target first.
+- **Under collection filters, a view whose targets were excluded is skipped**
+  and reported as a warning naming the view and the missing collections.
+  Dumping it would produce an artifact that cannot be restored.
 
 ### Split data artifacts (`export --split-bytes`)
 
@@ -118,7 +155,8 @@ Each artifact:
 | `compression` | `none` / `gzip` / `zstd`. |
 | `byte_size` | Size of the stored object in bytes. |
 | `checksum` | Optional `{ algorithm, value }` (SHA-256 over the stored bytes); present on data artifacts. |
-| `collection` | Owning collection, when applicable. |
+| `collection` | Owning collection, when applicable. Always absent on `view` artifacts. |
+| `view` | Owning view, on `view` artifacts. A view is not a collection, and restore groups collection artifacts by `collection`, so naming a view there would fabricate a collection with no structure. |
 | `database` | Owning database (multi-database dumps only). |
 | `part` | Part index for split data artifacts. |
 
