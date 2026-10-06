@@ -31,6 +31,13 @@ pub(crate) struct DumpArgs {
     #[arg(long)]
     pub include_system: bool,
 
+    /// Replace a dump already present at the destination.
+    ///
+    /// Without this, a destination holding a completed dump — or a partial one
+    /// from a failed or still-running dump — is refused rather than mixed into.
+    #[arg(long)]
+    pub overwrite: bool,
+
     /// Dump every accessible database. Artifacts are written under
     /// `databases/{name}/...` and described by a single combined manifest.
     #[arg(long)]
@@ -62,6 +69,7 @@ pub(crate) async fn run(args: DumpArgs, reporter: Reporter) -> Result<()> {
 
     let options = DumpOptions {
         include_system: args.include_system,
+        overwrite: args.overwrite,
         all_databases: args.all_databases,
         filters,
         // `--compression` here is an explicit codec, never auto (no extension

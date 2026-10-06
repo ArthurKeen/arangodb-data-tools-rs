@@ -89,6 +89,11 @@ impl FilterOptions {
 pub struct DumpOptions {
     /// Include system collections (names starting with `_`).
     pub include_system: bool,
+    /// Replace a dump already present at the destination.
+    ///
+    /// Without this, a destination that already holds a completed dump, or a
+    /// partial one from a failed or still-running dump, is refused.
+    pub overwrite: bool,
     /// Dump all accessible databases (writes per-database artifacts under
     /// `databases/{name}/...` and produces a combined manifest).
     pub all_databases: bool,
@@ -112,6 +117,7 @@ impl Default for DumpOptions {
     fn default() -> Self {
         Self {
             include_system: false,
+            overwrite: false,
             all_databases: false,
             filters: FilterOptions::default(),
             compression: Compression::None,
@@ -163,12 +169,102 @@ pub async fn run_dump_with_progress(
     // dump whose cross-shard completeness was never verified.
     preflight_topology(client, progress.as_deref()).await?;
 
+    // Claim the destination before writing anything, so two dumps aimed at one
+    // prefix cannot interleave their artifacts (PRD §9.2).
+    claim_destination(store, options).await?;
+
+    let outcome = run_dump_body(client, store, options, &mut state).await;
+    if outcome.is_ok() {
+        release_destination(store).await;
+    }
+    outcome
+}
+
+/// The object that marks a dump as in progress at a destination.
+///
+/// Written with a conditional create before any artifact and removed once the
+/// manifest lands, so its presence means either a dump is running right now or
+/// an earlier one died partway.
+pub const DUMP_LOCK_NAME: &str = "dump.in-progress.json";
+
+/// Takes exclusive ownership of the destination prefix.
+///
+/// Two guards, because they catch different things. The manifest check rejects
+/// a destination that already holds a *finished* dump, which is the common
+/// mistake and deserves its own message. The conditional create of the lock
+/// object is what actually makes concurrency safe: two dumps starting at the
+/// same instant both see no manifest, but only one can create the lock.
+///
+/// This is the conditional-write path the storage layer exists to provide —
+/// writing the lock with an unconditional put would reintroduce the very race
+/// it is here to close.
+async fn claim_destination(store: &dyn ObjectStore, options: &DumpOptions) -> Result<()> {
+    let lock = ObjectPath::new(DUMP_LOCK_NAME);
+    let manifest = ObjectPath::new("dump.manifest.json");
+
+    if options.overwrite {
+        // Clear both markers so the claim below succeeds. Failures are ignored:
+        // the conditional create is the real gate, and it will report anything
+        // that genuinely blocks the dump.
+        let _ = store.delete(&lock).await;
+        let _ = store.delete(&manifest).await;
+    } else if store.exists(&manifest).await? {
+        return Err(Error::config(format!(
+            "destination already contains a completed dump ('{}'). Dumping here would mix \
+             the two dumps' artifacts under one manifest. Choose an empty destination, or \
+             pass --overwrite to replace what is there.",
+            manifest.as_str()
+        )));
+    }
+
+    let body = serde_json::to_vec_pretty(&serde_json::json!({
+        "started_at": options.created_at,
+        "tool_version": options.tool_version,
+        "database": options.database,
+    }))?;
+    match store.put_if_absent(&lock, once(Bytes::from(body))).await {
+        Ok(_) => Ok(()),
+        Err(Error::AlreadyExists(_)) => Err(Error::config(format!(
+            "another dump is already writing to this destination, or an earlier one failed \
+             and left '{DUMP_LOCK_NAME}' behind. Artifacts from two dumps under one manifest \
+             would be silently inconsistent, so this run stops. Wait for the other dump, or \
+             pass --overwrite to discard what is there."
+        ))),
+        Err(err) => Err(err),
+    }
+}
+
+/// Removes the in-progress marker after the manifest has landed.
+///
+/// Best-effort: the dump is complete and valid at this point, so a failure to
+/// tidy up is logged rather than turned into a failed dump. The consequence is
+/// that the next dump to this prefix refuses until the marker is cleared, which
+/// is the safe direction to err in.
+async fn release_destination(store: &dyn ObjectStore) {
+    let lock = ObjectPath::new(DUMP_LOCK_NAME);
+    if let Err(err) = store.delete(&lock).await {
+        tracing::warn!(
+            path = DUMP_LOCK_NAME,
+            error = %err,
+            "dump finished but its in-progress marker could not be removed; \
+             the next dump to this destination will need --overwrite",
+        );
+    }
+}
+
+/// The dump itself, once the destination is claimed.
+async fn run_dump_body(
+    client: &ArangoClient,
+    store: &dyn ObjectStore,
+    options: &DumpOptions,
+    state: &mut DumpProgress<'_>,
+) -> Result<Manifest> {
     if !options.all_databases {
         let batch = client
             .replication_batch_create(options.batch_ttl_secs)
             .await?;
         // Ensure the batch is released regardless of how the dump finishes.
-        let result = dump_with_batch(client, store, options, &batch, &mut state).await;
+        let result = dump_with_batch(client, store, options, &batch, state).await;
         let _ = client.replication_batch_delete(&batch).await;
         result
     } else {
@@ -196,7 +292,7 @@ pub async fn run_dump_with_progress(
                 &prefix,
                 Some(&db),
                 &mut manifest,
-                &mut state,
+                state,
             )
             .await?;
             let _ = client_db.replication_batch_delete(&batch).await;
