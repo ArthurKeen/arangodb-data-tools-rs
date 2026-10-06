@@ -7,10 +7,25 @@ use std::process::Command;
 
 const ARANGOX: &str = env!("CARGO_BIN_EXE_arangox");
 
-/// Runs `arangox` with `args` and returns `(stdout + stderr, exit_ok)`.
+/// An output path inside the per-test temp dir.
+///
+/// These checks only exercise argument parsing, but the binary still runs, so
+/// any destination they name is really created. Pointing them at the temp dir
+/// keeps the repository clean — an earlier version used `-`, which is a literal
+/// file path here rather than stdout, and left a file named `-` behind.
+fn temp_output(name: &str) -> String {
+    std::env::temp_dir()
+        .join(format!("arangox-cli-contract-{name}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Runs `arangox` with `args` from the temp dir and returns
+/// `(stdout + stderr, exit_ok)`.
 fn run(args: &[&str]) -> (String, bool) {
     let out = Command::new(ARANGOX)
         .args(args)
+        .current_dir(std::env::temp_dir())
         .output()
         .expect("arangox binary runs");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -29,9 +44,17 @@ fn run(args: &[&str]) -> (String, bool) {
 /// that keeps the two apart.
 #[test]
 fn dump_and_export_accept_output_as_a_destination_path() {
+    let dump_out = temp_output("dump");
+    let export_out = temp_output("export");
     for args in [
-        vec!["dump", "--output", "/nonexistent-path-for-parse-test"],
-        vec!["export", "--query", "RETURN 1", "--output", "-"],
+        vec!["dump", "--output", dump_out.as_str()],
+        vec![
+            "export",
+            "--query",
+            "RETURN 1",
+            "--output",
+            export_out.as_str(),
+        ],
     ] {
         let (text, _) = run(&args);
         assert!(
@@ -63,7 +86,7 @@ fn conflicting_credential_sources_are_rejected_by_name() {
         "--query",
         "RETURN 1",
         "--output",
-        "-",
+        &temp_output("conflict"),
         "--username",
         "root",
         "--jwt-secret-env",
@@ -86,7 +109,13 @@ fn conflicting_credential_sources_are_rejected_by_name() {
 #[test]
 fn auth_jwt_without_a_username_explains_the_alternatives() {
     let (text, ok) = run(&[
-        "export", "--query", "RETURN 1", "--output", "-", "--auth", "jwt",
+        "export",
+        "--query",
+        "RETURN 1",
+        "--output",
+        &temp_output("authjwt"),
+        "--auth",
+        "jwt",
     ]);
     assert!(!ok, "--auth jwt without --username must fail");
     assert!(
@@ -106,7 +135,7 @@ fn an_unset_credential_variable_names_the_variable() {
         "--query",
         "RETURN 1",
         "--output",
-        "-",
+        &temp_output("conflict"),
         "--jwt-secret-env",
         "DEFINITELY_UNSET_VAR_FOR_TEST",
     ]);
