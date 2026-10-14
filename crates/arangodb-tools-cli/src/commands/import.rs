@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
-    decompress, read_documents, run_import_with_checkpoint, validate_edge_documents,
-    ArangoBatchSender, BatchSender, CheckpointConfig, ImportFormat,
+    decompress, read_documents_with, run_import_with_checkpoint, validate_edge_documents,
+    ArangoBatchSender, BatchSender, CheckpointConfig, ColumnTransforms, ImportFormat,
 };
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -62,6 +62,33 @@ pub(crate) struct ImportArgs {
     /// Truncate the collection before importing (non-atomic; see PRD §8.2).
     #[arg(long)]
     pub overwrite: bool,
+
+    /// Force a CSV/TSV column to a type: `COLUMN=string|number|boolean`.
+    ///
+    /// Repeatable. Overrides the automatic type detection for that column.
+    /// `_key`, `_from`, `_to` and `_id` are always strings and need no entry.
+    #[arg(long, value_name = "COLUMN=TYPE")]
+    pub datatype: Vec<String>,
+
+    /// Rename a CSV/TSV column: `SOURCE=TARGET`.
+    ///
+    /// Repeatable. Applied after --merge-attributes, so a template may use a
+    /// column this also renames.
+    #[arg(long, value_name = "SOURCE=TARGET")]
+    pub translate: Vec<String>,
+
+    /// Build an attribute from other columns: `TARGET=[col1]_[col2]`.
+    ///
+    /// Repeatable. Bracketed names are column references; everything else is
+    /// literal text. Source columns are kept.
+    #[arg(long, value_name = "TARGET=TEMPLATE")]
+    pub merge_attributes: Vec<String>,
+
+    /// Drop a CSV/TSV column: the column name.
+    ///
+    /// Repeatable. Useful for projecting an edge file out of a wide table.
+    #[arg(long, value_name = "COLUMN")]
+    pub remove_attribute: Vec<String>,
 
     /// Prefix applied to unqualified `_from` values (edge imports).
     #[arg(long, value_name = "COLLECTION")]
@@ -159,7 +186,20 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
 
     let compression = args.compression.resolve(&args.input);
     let raw = open_input(&args.input).await?;
-    let mut documents = read_documents(format, decompress(compression, raw));
+    let transforms = ColumnTransforms::new(
+        &args.datatype,
+        &args.translate,
+        &args.merge_attributes,
+        &args.remove_attribute,
+    )?;
+    if !transforms.is_empty() && !matches!(format, ImportFormat::Csv | ImportFormat::Tsv) {
+        return Err(Error::config(
+            "--datatype, --translate, --merge-attributes and --remove-attribute apply to \
+             CSV/TSV input only; JSON and JSONL documents already carry their own attribute \
+             names and types",
+        ));
+    }
+    let mut documents = read_documents_with(format, decompress(compression, raw), transforms);
     if args.edge {
         // Catch malformed edges before sending, rather than relying on
         // per-document server rejection. Bare keys are allowed for an endpoint

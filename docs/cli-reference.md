@@ -18,6 +18,61 @@ Storage locations (`--input`, `--output`, `--checkpoint`) accept a local path,
 `file://`, `s3://`, `seaweed+s3://`, `gs://`, or `az://`. Credentials always
 come from the environment, never the command line.
 
+## CSV/TSV column reshaping
+
+A CSV dump rarely has the shape the target graph needs. These four options
+reshape columns during the load and are named to match `arangoimport`, so a
+generated script can use either tool. They apply to CSV/TSV only; JSON and
+JSONL documents already carry their own names and types.
+
+| Option | Form | Effect |
+| --- | --- | --- |
+| `--datatype` | `COLUMN=string\|number\|boolean` | Force a column's type instead of detecting it |
+| `--translate` | `SOURCE=TARGET` | Rename a column |
+| `--merge-attributes` | `TARGET=[a]_[b]` | Build an attribute from others; brackets are column refs, the rest is literal |
+| `--remove-attribute` | `COLUMN` | Drop a column |
+
+All four are repeatable. Order of operations, matching `arangoimport`: detect
+types, then merge, then rename, then remove. Merging before renaming is what
+lets a template reference a column that is also being renamed.
+
+```bash
+# A PG dump whose primary key must become _key, dropping a payload column
+arangox import --collection people --input people.csv --create-collection \
+  --translate 'person_id=_key' --datatype 'person_id=string' \
+  --remove-attribute internal_notes
+
+# A composite key from two columns
+arangox import --collection orders --input orders.csv --create-collection \
+  --merge-attributes '_key=[order_id]_[line_no]'
+
+# An edge file projected out of a wide table
+arangox import --collection knows --input rel.csv --create-collection --edge \
+  --translate 'src=_from' --translate 'dst=_to' \
+  --from-collection-prefix people --to-collection-prefix people \
+  --remove-attribute payload
+```
+
+### Reserved attributes are always strings
+
+`_key`, `_from`, `_to` and `_id` are never type-detected: they take their
+column's raw text. ArangoDB rejects a numeric `_key` outright ("illegal
+document key", error 1221), and an edge needs `collection/key` strings, so a
+CSV with numeric identifiers would otherwise be unloadable. No `--datatype` is
+needed for these.
+
+### One deliberate difference from `arangoimport`
+
+`arangoimport` coerces a numeric-looking column to a number, which **drops
+leading zeros**: `00789` is stored as `789`. This tool keeps `00789` as a
+string, because silently renumbering a ZIP code or a zero-padded part number is
+data loss.
+
+The difference is only visible for zero-padded values in columns that are not
+reserved attributes. Where byte-for-byte parity with `arangoimport` matters,
+`--datatype COLUMN=string` makes the two agree — verified by loading the same
+fixture through both tools and comparing the stored documents.
+
 ## Connection options (all subcommands)
 
 | Flag | Default | Description |

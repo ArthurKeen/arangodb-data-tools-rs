@@ -5,6 +5,9 @@
 //! source document, parsing incrementally so input is never fully buffered in
 //! memory. The downstream batcher and sender treat all formats uniformly.
 
+pub mod columns;
+
+use columns::ColumnTransforms;
 mod delimited;
 mod json_array;
 mod jsonl;
@@ -31,12 +34,28 @@ pub fn read_documents<R>(format: ImportFormat, reader: R) -> DocumentStream
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    read_documents_with(format, reader, ColumnTransforms::default())
+}
+
+/// Reads `reader` as `format`, applying per-column reshaping.
+///
+/// `transforms` only affects delimited input. JSON and JSONL documents already
+/// carry their own types and attribute names, which is also how `arangoimport`
+/// treats `--translate` and friends.
+pub fn read_documents_with<R>(
+    format: ImportFormat,
+    reader: R,
+    transforms: ColumnTransforms,
+) -> DocumentStream
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     match format {
         ImportFormat::JsonLines => jsonl::read(reader),
         ImportFormat::JsonArray => json_array::read(reader),
         ImportFormat::Csv | ImportFormat::Tsv => {
             // `delimiter()` is always `Some` for CSV/TSV.
-            delimited::read(reader, format.delimiter().unwrap_or(b','))
+            delimited::read(reader, format.delimiter().unwrap_or(b','), transforms)
         }
     }
 }

@@ -9,36 +9,45 @@ A Rust library and CLI toolkit for ArangoDB bulk data workflows: **import**, **e
 
 ### CLI
 
-Install the `arangox` binary from crates.io (requires a stable Rust toolchain):
+> **Not yet published to crates.io.** None of these crates are on the registry
+> while the project is pre-alpha, so `cargo install` and `cargo add` do not work
+> for them. Build from source, or depend on the repository by git URL.
 
-```bash
-cargo install arangodb-tools-cli    # installs the `arangox` binary
-```
-
-Or build it from source:
+Build the `arangox` binary from source (requires a stable Rust toolchain):
 
 ```bash
 git clone https://github.com/ArthurKeen/arangodb-data-tools-rs
+cd arangodb-data-tools-rs
 cargo build --release -p arangodb-tools-cli   # ./target/release/arangox
 ```
 
 ### Library
 
-Add just the crates you need to your `Cargo.toml` (they run on `tokio`):
+Until the crates are published, depend on them by git URL (they run on `tokio`):
 
-```bash
-cargo add arangodb-import      # streaming bulk import
-cargo add arangodb-export      # export via AQL cursors
-cargo add arangodb-dump arangodb-restore   # manifest-driven dump/restore
-cargo add arangodb-rdf         # RDF bulk load (N-Triples/N-Quads/Turtle)
-cargo add arangodb-storage     # storage backends (local / S3 / GCS / Azure)
+```toml
+[dependencies]
+# streaming bulk import
+arangodb-import  = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
+# export via AQL cursors
+arangodb-export  = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
+# manifest-driven dump/restore
+arangodb-dump    = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
+arangodb-restore = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
+# RDF bulk load (N-Triples/N-Quads/Turtle)
+arangodb-rdf     = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
+# storage backends (local / S3 / GCS / Azure)
+arangodb-storage = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
 ```
+
+Pin a revision with `rev = "..."` for anything reproducible: the CLI and library
+surfaces still change without notice.
 
 ## Quickstart
 
 ```bash
-# 1. Install the CLI
-cargo install arangodb-tools-cli
+# 1. Build the CLI (not yet on crates.io)
+cargo build --release -p arangodb-tools-cli   # ./target/release/arangox
 
 # 2. Keep secrets out of argv: the password is read from an env var by name
 export ARANGO_PASSWORD='...'
@@ -254,6 +263,12 @@ requirement audit (see [`docs/scorecard.md`](docs/scorecard.md)).
   embedded in the view's links — yet querying it fails with `Unable to look up
   analyzer '<name>'`. Views using only built-in analyzers are unaffected.
   Recreate custom analyzers on the target before restoring.
+- **CSV reshaping differs from `arangoimport` on leading zeros.** `--datatype`,
+  `--translate`, `--merge-attributes` and `--remove-attribute` match
+  `arangoimport`, verified by loading the same fixture through both tools. One
+  deliberate difference: `arangoimport` turns `00789` into `789`, while this
+  tool keeps `"00789"`, because dropping leading zeros corrupts ZIP codes and
+  padded identifiers. `--datatype COLUMN=string` makes the two agree.
 - **No interoperability with `arangodump`/`arangorestore` yet.** The project manifest
   format is canonical and self-describing, but neither direction of compatibility is
   implemented: this tool cannot read an official `arangodump` directory, and official

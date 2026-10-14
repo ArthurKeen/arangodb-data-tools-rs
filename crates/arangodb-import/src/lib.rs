@@ -38,7 +38,8 @@ pub use arangodb_tools_core::manifest::ImportCheckpoint;
 pub use batch::{into_batches, Batch};
 pub use edge::validate_edge_documents;
 pub use format::ImportFormat;
-pub use reader::{read_documents, DocumentStream};
+pub use reader::columns::{ColumnTransforms, ColumnType};
+pub use reader::{read_documents, read_documents_with, DocumentStream};
 pub use sender::{
     load_checkpoint, run_import, run_import_with_checkpoint, ArangoBatchSender, BatchSender,
     CheckpointConfig, ImportSummary,
