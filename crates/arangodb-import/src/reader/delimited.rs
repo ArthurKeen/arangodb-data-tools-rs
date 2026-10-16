@@ -270,6 +270,24 @@ mod tests {
         assert_eq!(rows[0]["ident"], Value::from(7), "the rename still applied");
     }
 
+    /// A zero-padded value forced to a number parses correctly.
+    ///
+    /// This is where `arangoimport` loses data. Given `--datatype col=number`
+    /// and a value of `00042` it emits `00042` into its JSON payload, which is
+    /// not a legal JSON number, then fails to parse its own output and **drops
+    /// the row** — logging a warning but exiting 0, so a script running under
+    /// `set -euo pipefail` continues and reports success. Verified against
+    /// ArangoDB 3.12.4: three input rows, two imported, exit code 0.
+    ///
+    /// Parsing to `42` is both correct and lossless for the caller's stated
+    /// intent, so no row is lost.
+    #[test]
+    fn a_zero_padded_value_forced_to_number_parses_rather_than_failing() {
+        let rows = read_with("id,fk\n1003,00042\n", (&["fk=number"], &[], &[], &[]));
+        assert_eq!(rows[0]["fk"], Value::from(42));
+        assert_eq!(rows.len(), 1, "the row survives");
+    }
+
     /// Leading zeros are preserved, unlike arangoimport which coerces `00789`
     /// to `789`. This is deliberate — losing them corrupts ZIP codes and
     /// zero-padded identifiers — and `--datatype col=string` reconciles the

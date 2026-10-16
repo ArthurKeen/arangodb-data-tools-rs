@@ -263,12 +263,15 @@ requirement audit (see [`docs/scorecard.md`](docs/scorecard.md)).
   embedded in the view's links — yet querying it fails with `Unable to look up
   analyzer '<name>'`. Views using only built-in analyzers are unaffected.
   Recreate custom analyzers on the target before restoring.
-- **CSV reshaping differs from `arangoimport` on leading zeros.** `--datatype`,
-  `--translate`, `--merge-attributes` and `--remove-attribute` match
-  `arangoimport`, verified by loading the same fixture through both tools. One
-  deliberate difference: `arangoimport` turns `00789` into `789`, while this
-  tool keeps `"00789"`, because dropping leading zeros corrupts ZIP codes and
-  padded identifiers. `--datatype COLUMN=string` makes the two agree.
+- **CSV reshaping differs from `arangoimport` on zero-padded values — on
+  purpose.** `--datatype`, `--translate`, `--merge-attributes` and
+  `--remove-attribute` otherwise match `arangoimport`, verified by loading the
+  same fixture through both tools and comparing what landed. The difference:
+  `arangoimport` turns `00789` into `789`, and when such a value is forced to a
+  number it emits invalid JSON, **drops the row, and still exits 0**. This tool
+  keeps `"00789"` as text, or parses `00042` to `42` when you ask for a number
+  — either way the row survives. `--datatype COLUMN=string` makes the two tools
+  agree where byte-for-byte parity matters.
 - **No interoperability with `arangodump`/`arangorestore` yet.** The project manifest
   format is canonical and self-describing, but neither direction of compatibility is
   implemented: this tool cannot read an official `arangodump` directory, and official

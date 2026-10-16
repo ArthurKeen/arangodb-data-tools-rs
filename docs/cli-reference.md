@@ -61,17 +61,32 @@ document key", error 1221), and an edge needs `collection/key` strings, so a
 CSV with numeric identifiers would otherwise be unloadable. No `--datatype` is
 needed for these.
 
-### One deliberate difference from `arangoimport`
+### Zero-padded values: a deliberate difference, and a bug avoided
 
 `arangoimport` coerces a numeric-looking column to a number, which **drops
 leading zeros**: `00789` is stored as `789`. This tool keeps `00789` as a
 string, because silently renumbering a ZIP code or a zero-padded part number is
-data loss.
+data loss. Where byte-for-byte parity matters, `--datatype COLUMN=string` makes
+the two agree.
 
-The difference is only visible for zero-padded values in columns that are not
-reserved attributes. Where byte-for-byte parity with `arangoimport` matters,
-`--datatype COLUMN=string` makes the two agree — verified by loading the same
-fixture through both tools and comparing the stored documents.
+Forcing such a column to a number is worse in `arangoimport`, and the
+difference is not cosmetic. Given `--datatype col=number` and a value of
+`00042`, it writes `00042` into its JSON request body. That is not a legal JSON
+number, so it fails to parse its own payload and **discards the row**:
+
+```
+WARNING at position 4: invalid JSON type (expecting object, probably parse error),
+offending context: ["1003",00042,5.25,1,"padded customer"]
+created: 2          <- three rows were read
+```
+
+It then **exits 0**, so a generated script running under `set -euo pipefail`
+continues and reports success while a row is missing. Verified against
+ArangoDB 3.12.4.
+
+This tool parses the same value to `42` and keeps the row. If you want it kept
+as the text `00042` instead, ask for `--datatype col=string`; either way
+nothing is silently dropped.
 
 ## Connection options (all subcommands)
 
