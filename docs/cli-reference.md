@@ -69,24 +69,29 @@ string, because silently renumbering a ZIP code or a zero-padded part number is
 data loss. Where byte-for-byte parity matters, `--datatype COLUMN=string` makes
 the two agree.
 
-Forcing such a column to a number is worse in `arangoimport`, and the
-difference is not cosmetic. Given `--datatype col=number` and a value of
-`00042`, it writes `00042` into its JSON request body. That is not a legal JSON
-number, so it fails to parse its own payload and **discards the row**:
+### A value a column's declared type cannot hold
+
+`arangoimport` builds its request body by substituting the raw CSV token. When
+the token is not a legal JSON value for the type you asked for, the body is
+malformed, it fails to parse its own payload, and it **discards that row** —
+then **exits 0**, so a generated script running under `set -euo pipefail`
+continues and reports success with a row missing.
+
+The most reachable case is an empty field in a column typed as a number:
 
 ```
-WARNING at position 4: invalid JSON type (expecting object, probably parse error),
-offending context: ["1003",00042,5.25,1,"padded customer"]
+WARNING at position 3: invalid JSON type (expecting object, probably parse error),
+offending context: ["2",]
 created: 2          <- three rows were read
 ```
 
-It then **exits 0**, so a generated script running under `set -euo pipefail`
-continues and reports success while a row is missing. Verified against
-ArangoDB 3.12.4.
+A zero-padded value does the same (`["1003",00042,...]` — `00042` is not a
+legal JSON number). Both verified against ArangoDB 3.12.4.
 
-This tool parses the same value to `42` and keeps the row. If you want it kept
-as the text `00042` instead, ask for `--datatype col=string`; either way
-nothing is silently dropped.
+This tool treats an empty field as null and keeps the row, and parses `00042`
+to `42`. A value that genuinely cannot be converted is reported as an error
+naming the column, the value and the flag that asked for the type — it is never
+dropped quietly.
 
 ## Connection options (all subcommands)
 

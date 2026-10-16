@@ -272,12 +272,14 @@ mod tests {
 
     /// A zero-padded value forced to a number parses correctly.
     ///
-    /// This is where `arangoimport` loses data. Given `--datatype col=number`
-    /// and a value of `00042` it emits `00042` into its JSON payload, which is
-    /// not a legal JSON number, then fails to parse its own output and **drops
-    /// the row** — logging a warning but exiting 0, so a script running under
-    /// `set -euo pipefail` continues and reports success. Verified against
-    /// ArangoDB 3.12.4: three input rows, two imported, exit code 0.
+    /// This is where `arangoimport` loses data. It substitutes the raw CSV
+    /// token into its JSON request body, so a token that is not a legal JSON
+    /// value for the requested type produces a malformed body, which it then
+    /// fails to parse and **drops that row** — logging a warning but exiting
+    /// 0, so a script under `set -euo pipefail` continues and reports success.
+    /// Verified against ArangoDB 3.12.4 for both `00042` (not a legal JSON
+    /// number) and an empty field, which yields `["2",]`. Three rows in, two
+    /// stored, exit code 0 in each case.
     ///
     /// Parsing to `42` is both correct and lossless for the caller's stated
     /// intent, so no row is lost.

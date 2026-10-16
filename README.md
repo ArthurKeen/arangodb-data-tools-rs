@@ -267,11 +267,14 @@ requirement audit (see [`docs/scorecard.md`](docs/scorecard.md)).
   purpose.** `--datatype`, `--translate`, `--merge-attributes` and
   `--remove-attribute` otherwise match `arangoimport`, verified by loading the
   same fixture through both tools and comparing what landed. The difference:
-  `arangoimport` turns `00789` into `789`, and when such a value is forced to a
-  number it emits invalid JSON, **drops the row, and still exits 0**. This tool
-  keeps `"00789"` as text, or parses `00042` to `42` when you ask for a number
-  — either way the row survives. `--datatype COLUMN=string` makes the two tools
-  agree where byte-for-byte parity matters.
+  `arangoimport` turns `00789` into `789`. More seriously, when a column's raw
+  token is not a legal JSON value for the type it was told to use — an empty
+  field typed as a number is the common case — it emits malformed JSON,
+  **drops that row, and still exits 0**, so a script set to stop on errors
+  carries on. This tool treats an empty field as null, parses `00042` to `42`,
+  and reports a genuinely unconvertible value as an error naming the column and
+  flag. `--datatype COLUMN=string` makes the two tools agree where
+  byte-for-byte parity matters.
 - **No interoperability with `arangodump`/`arangorestore` yet.** The project manifest
   format is canonical and self-describing, but neither direction of compatibility is
   implemented: this tool cannot read an official `arangodump` directory, and official
