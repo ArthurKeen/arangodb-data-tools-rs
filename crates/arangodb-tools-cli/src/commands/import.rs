@@ -7,7 +7,7 @@ use std::time::Instant;
 use arangodb_client::{CollectionKind, ImportOptions, OnDuplicate};
 use arangodb_import::{
     decompress, read_documents_with, run_import_with_checkpoint, validate_edge_documents,
-    ArangoBatchSender, BatchSender, CheckpointConfig, ColumnTransforms, ImportFormat,
+    ArangoBatchSender, BatchSender, CheckpointConfig, ColumnTransforms, ImportFormat, SkippedEdges,
 };
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
@@ -200,6 +200,9 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
         ));
     }
     let mut documents = read_documents_with(format, decompress(compression, raw), transforms);
+    // Rows whose edge endpoint is empty carry no edge and are skipped; the
+    // count is reported so an unexpectedly empty required key is still visible.
+    let skipped_edges = SkippedEdges::default();
     if args.edge {
         // Catch malformed edges before sending, rather than relying on
         // per-document server rejection. Bare keys are allowed for an endpoint
@@ -208,6 +211,7 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
             documents,
             args.from_collection_prefix.is_some(),
             args.to_collection_prefix.is_some(),
+            Arc::clone(&skipped_edges),
         );
     }
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(client, options));
@@ -243,11 +247,24 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
     });
 
     let collection = args.collection.clone();
+    let skipped_no_edge = skipped_edges.load(std::sync::atomic::Ordering::Relaxed);
     reporter.result(
         || {
+            // The skip count is appended only when non-zero: it is normal for
+            // an optional foreign key and alarming for a required one, and a
+            // permanent "skipped=0" would train the reader to ignore it.
+            let skipped_note = if skipped_no_edge > 0 {
+                format!(
+                    "\n  skipped {skipped_no_edge} row(s) with an empty _from/_to \
+                     (no edge); expected for an optional foreign key, check the \
+                     source if the key is required"
+                )
+            } else {
+                String::new()
+            };
             format!(
                 "imported {} document(s) into '{}' in {} batch(es) over {:.2}s ({:.0} docs/s)\n  \
-                 created={} errors={} updated={} ignored={} empty={} bytes_sent={}",
+                 created={} errors={} updated={} ignored={} empty={} bytes_sent={}{}",
                 summary.documents_sent,
                 collection,
                 summary.batches,
@@ -259,6 +276,7 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
                 summary.ignored,
                 summary.empty,
                 summary.bytes_sent,
+                skipped_note,
             )
         },
         || {
@@ -266,6 +284,7 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
                 "operation": "import",
                 "status": if summary.errors > 0 { "completed_with_errors" } else { "ok" },
                 "collection": args.collection,
+                "skipped_no_edge": skipped_no_edge,
                 "documents_sent": summary.documents_sent,
                 "batches": summary.batches,
                 "created": summary.created,

@@ -119,6 +119,7 @@ async fn imports_edges_with_preflight() {
         read_documents(ImportFormat::JsonLines, reader),
         false,
         false,
+        Default::default(),
     );
     let sender: Arc<dyn BatchSender> = Arc::new(ArangoBatchSender::new(
         client.clone(),

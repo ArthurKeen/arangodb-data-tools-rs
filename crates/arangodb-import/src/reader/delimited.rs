@@ -91,9 +91,17 @@ where
 
 /// Converts a field to an explicitly requested type.
 ///
-/// A value that cannot be represented is an error rather than a silent
-/// fallback: the user asked for this type, and quietly storing something else
-/// is how a load "succeeds" into a shape nothing downstream expects.
+/// A non-empty value that cannot be represented is an error rather than a
+/// silent fallback: the user asked for this type, and quietly storing
+/// something else is how a load "succeeds" into a shape nothing downstream
+/// expects.
+///
+/// An **empty** field is the exception and becomes `null`, because an empty
+/// CSV field means "no value" and `null` is its faithful representation. This
+/// applies even where the source schema declares the column NOT NULL, so an
+/// unexpectedly empty required field is recorded rather than flagged — a
+/// deliberate trade, since the alternative (arangoimport's) is to discard the
+/// row.
 fn coerce(field: &str, kind: ColumnType, column: &str, row: u64) -> Result<Value, Error> {
     let bad = |expected: &str| Error::Parse {
         message: format!(

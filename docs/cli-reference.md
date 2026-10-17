@@ -61,6 +61,23 @@ document key", error 1221), and an edge needs `collection/key` strings, so a
 CSV with numeric identifiers would otherwise be unloadable. No `--datatype` is
 needed for these.
 
+### Edge rows with no link
+
+A relational export writes an empty field for an optional foreign key that has
+no value. Such a row carries no edge, so it is **skipped** rather than treated
+as malformed — failing would make an ordinary nullable foreign key unloadable,
+costing the whole edge collection for one missing link.
+
+Skips are counted and reported, in the text summary and as `skipped_no_edge`
+in `--output-format json`. The count is normal for an optional key and worth
+investigating for a required one; `arangoimport` performs the same skip but
+reports it only as a warning.
+
+A **missing** `_from`/`_to` attribute is still a hard error. That is a mapping
+mistake rather than per-row data — it would affect every row — so it fails
+immediately instead of silently skipping the entire file. A non-empty but
+malformed endpoint (a bare key with no prefix configured) also still fails.
+
 ### Zero-padded values: a deliberate difference, and a bug avoided
 
 `arangoimport` coerces a numeric-looking column to a number, which **drops
@@ -88,10 +105,17 @@ created: 2          <- three rows were read
 A zero-padded value does the same (`["1003",00042,...]` — `00042` is not a
 legal JSON number). Both verified against ArangoDB 3.12.4.
 
-This tool treats an empty field as null and keeps the row, and parses `00042`
-to `42`. A value that genuinely cannot be converted is reported as an error
-naming the column, the value and the flag that asked for the type — it is never
-dropped quietly.
+This tool keeps the row in both cases: an empty field becomes `null`, and
+`00042` parses to `42`. A **non-empty** value that cannot be converted — say
+`abc` in a column typed `number` — is an error naming the column, the value and
+the flag that asked for the type.
+
+Note the asymmetry: an empty field is converted to `null` rather than reported,
+including in a column the source schema declares NOT NULL. That is deliberate —
+an empty CSV field genuinely means "no value", and `null` is the faithful
+representation — but it does mean a required column arriving empty is recorded
+rather than flagged. Use `--datatype COLUMN=string` if you would rather keep
+the empty string.
 
 ## Connection options (all subcommands)
 

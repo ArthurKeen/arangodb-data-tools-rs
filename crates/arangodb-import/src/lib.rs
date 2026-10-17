@@ -36,7 +36,7 @@ pub use arangodb_client::{ImportOptions, ImportResult, OnDuplicate};
 pub use arangodb_storage::{decompress, Compression};
 pub use arangodb_tools_core::manifest::ImportCheckpoint;
 pub use batch::{into_batches, Batch};
-pub use edge::validate_edge_documents;
+pub use edge::{validate_edge_documents, SkippedEdges};
 pub use format::ImportFormat;
 pub use reader::columns::{ColumnTransforms, ColumnType};
 pub use reader::{read_documents, read_documents_with, DocumentStream};
