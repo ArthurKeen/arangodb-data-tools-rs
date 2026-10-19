@@ -61,6 +61,19 @@ document key", error 1221), and an edge needs `collection/key` strings, so a
 CSV with numeric identifiers would otherwise be unloadable. No `--datatype` is
 needed for these.
 
+### An empty field becomes null, not an absent attribute
+
+Given an empty CSV field, this tool stores `"note": null`; `arangoimport`
+omits the attribute entirely. Most AQL comparisons cannot tell the two apart
+(`d.note == null` is true either way), but `HAS(d, "note")` and
+`ATTRIBUTES(d)` can, so a query written against one tool's output may behave
+differently against the other's.
+
+Storing null is the deliberate choice: the column exists in the source and the
+row has no value for it, which is what null means. It also matches what the
+streaming and JSONL paths produce, so one dataset does not change shape
+depending on which route loaded it.
+
 ### Edge rows with no link
 
 A relational export writes an empty field for an optional foreign key that has
