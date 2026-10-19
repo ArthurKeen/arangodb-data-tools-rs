@@ -3,6 +3,7 @@
 pub(crate) mod connection;
 pub(crate) mod dump;
 pub(crate) mod export;
+pub(crate) mod graph;
 pub(crate) mod import;
 pub(crate) mod rdf;
 pub(crate) mod restore;

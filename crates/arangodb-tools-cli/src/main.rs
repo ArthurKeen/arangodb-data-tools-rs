@@ -39,6 +39,8 @@ enum Command {
     Restore(commands::restore::RestoreArgs),
     /// Bulk-import RDF (N-Triples/N-Quads) into a property graph.
     Rdf(commands::rdf::RdfArgs),
+    /// Create or drop a named graph over existing collections.
+    Graph(commands::graph::GraphArgs),
 }
 
 #[tokio::main]
@@ -51,6 +53,7 @@ async fn main() -> std::process::ExitCode {
         Command::Dump(args) => commands::dump::run(args, reporter).await,
         Command::Restore(args) => commands::restore::run(args, reporter).await,
         Command::Rdf(args) => commands::rdf::run(args, reporter).await,
+        Command::Graph(args) => commands::graph::run(args, reporter).await,
     };
 
     match result {

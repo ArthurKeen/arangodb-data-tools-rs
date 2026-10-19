@@ -18,6 +18,33 @@ Storage locations (`--input`, `--output`, `--checkpoint`) accept a local path,
 `file://`, `s3://`, `seaweed+s3://`, `gs://`, or `az://`. Credentials always
 come from the environment, never the command line.
 
+## `graph` — named graphs
+
+A bulk load usually ends by declaring a named graph over the collections it
+just populated. Without this the last step needs `arangosh`, which means
+installing the ArangoDB client package for one API call.
+
+```bash
+arangox graph create --name demo \
+  --edge-definition 'orders_to_customers:orders->customers' \
+  --edge-definition 'orders_to_customers_referrer:orders->customers'
+
+arangox graph drop --name demo          # collections are kept
+arangox graph drop --name demo --drop-collections
+```
+
+| Option | Form | Notes |
+| --- | --- | --- |
+| `--edge-definition` | `EDGE:FROM[,FROM...]->TO[,TO...]` | Repeatable. Mirrors `graph._relation(edge, from, to)`. |
+| `--orphan-collection` | `COLLECTION` | Repeatable. A vertex collection in no edge definition. |
+| `--overwrite` | — | Replace an existing graph; its collections and documents are untouched. |
+
+Collections named in a definition are **created if missing**, so a graph can
+be declared before its data is loaded. Creating a graph that already exists is
+refused rather than silently replaced — pass `--overwrite` to replace it, which
+drops only the definition. `graph drop` is idempotent: dropping a graph that is
+not there succeeds, so a teardown step can run unconditionally.
+
 ## CSV/TSV column reshaping
 
 A CSV dump rarely has the shape the target graph needs. These four options

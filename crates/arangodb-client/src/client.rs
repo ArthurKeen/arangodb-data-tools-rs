@@ -494,6 +494,41 @@ impl ArangoClient {
         Err(http_error(status, payload.as_ref()))
     }
 
+    /// Creates a named graph from its edge definitions.
+    ///
+    /// Verified against ArangoDB 3.12: the server **creates any collection
+    /// named in the definitions that does not yet exist**, so a graph can be
+    /// declared before its data is loaded. An existing graph of the same name
+    /// is refused with 409 / error 1925.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, including when the graph already
+    /// exists.
+    pub async fn create_graph(&self, definition: &serde_json::Value) -> Result<()> {
+        let payload = serde_json::to_vec(definition)?;
+        self.execute(Method::POST, "/_api/gharial", Some(&payload))
+            .await?;
+        Ok(())
+    }
+
+    /// Drops a named graph, ignoring a 404 so the call is idempotent.
+    ///
+    /// `drop_collections` also removes the collections the graph referenced;
+    /// without it they survive the graph, which is the server's default and
+    /// the safe choice when the data was loaded separately.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails for any reason other than the
+    /// graph being absent.
+    pub async fn drop_graph(&self, name: &str, drop_collections: bool) -> Result<()> {
+        let path = format!("/_api/gharial/{name}?dropCollections={drop_collections}");
+        match self.execute(Method::DELETE, &path, None).await {
+            Ok(_) => Ok(()),
+            Err(Error::Http { status: 404, .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Creates a view from a definition as returned by the replication
     /// inventory.
     ///

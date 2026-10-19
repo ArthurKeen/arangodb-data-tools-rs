@@ -2,8 +2,16 @@
 
 A Rust library and CLI toolkit for ArangoDB bulk data workflows: **import**, **export**, **dump**, and **restore**, with first-class support for pluggable storage backends (local files and object storage such as S3, GCS, Azure, and SeaweedFS) and RDF bulk-loading (N-Triples, N-Quads, and Turtle).
 
-> **Status: pre-alpha / under active development.**
-> This project is a clean-room reimplementation modeled on the behavior of ArangoDB's client tools (`arangoimport`, `arangoexport`, `arangodump`, `arangorestore`). It does **not** embed or link ArangoDB's C++ client code. Interoperability with the official tools is a scoped, best-effort goal and is not yet guaranteed. APIs, formats, and CLI options will change without notice until the first tagged release.
+> **Status: alpha (`v0.1.0`).**
+> This project is a clean-room reimplementation modeled on the behavior of ArangoDB's client tools (`arangoimport`, `arangoexport`, `arangodump`, `arangorestore`). It does **not** embed or link ArangoDB's C++ client code. Interoperability with the official tools is a scoped, best-effort goal and is not yet guaranteed.
+>
+> **CLI compatibility promise.** From `v0.1.0`, the CLI's flag surface is stable
+> within the `0.1.x` series: no flag will be renamed or removed, and no flag's
+> meaning will change, in a `0.1.x` release. New flags may be added, and
+> defaults may change only where the current default is a defect. This matters
+> for tools that *generate* `arangox` commands into scripts their users keep —
+> those scripts keep working across `0.1.x` upgrades. Library APIs carry no such
+> promise yet and will change before `1.0`.
 
 ## Installation
 
@@ -40,8 +48,9 @@ arangodb-rdf     = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs
 arangodb-storage = { git = "https://github.com/ArthurKeen/arangodb-data-tools-rs" }
 ```
 
-Pin a revision with `rev = "..."` for anything reproducible: the CLI and library
-surfaces still change without notice.
+Pin a tag with `tag = "v0.1.0"` for anything reproducible. The CLI's flag
+surface is stable within `0.1.x` (see the compatibility promise above); library
+APIs are not yet.
 
 ## Quickstart
 
@@ -92,7 +101,7 @@ This is a Cargo workspace. See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATI
 | `arangodb-dump` | Database dump (manifest-driven), including search views | Implemented |
 | `arangodb-restore` | Database restore from a dump, including search views | Implemented |
 | `arangodb-rdf` | RDF bulk import into a property graph (N-Triples, N-Quads, Turtle) | Implemented |
-| `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore`, `rdf` subcommands | Implemented |
+| `arangodb-tools-cli` | The `arangox` CLI: `import`, `export`, `dump`, `restore`, `rdf`, `graph` subcommands | Implemented |
 
 > Storage backends: local filesystem, S3-compatible (AWS S3, MinIO/LocalStack, SeaweedFS via its S3 gateway), Google Cloud Storage (`gs://`), and Azure Blob Storage (`az://`) are all wired, each configured from its standard environment variables. See [`docs/backends.md`](docs/backends.md).
 
@@ -109,7 +118,7 @@ cargo fmt --all --check
 
 ## Usage
 
-The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, `restore`, and `rdf` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--tls-ca`, and `--insecure`, plus one credential source — `--username` with `--password-env` (add `--auth jwt` to log in at `/_open/auth` instead of resending the password), `--jwt-secret-file`/`--jwt-secret-env` to mint a superuser JWT from the server's secret, or `--auth-token-env` for a token you already hold. Secrets are always read from a file or a named environment variable, never passed on the command line, and supplying two credential sources is an error naming both. See [`docs/authentication.md`](docs/authentication.md).
+The CLI is a single binary, `arangox`, with `import`, `export`, `dump`, `restore`, `rdf`, and `graph` subcommands. All subcommands share connection flags: `--endpoint` (default `http://localhost:8529`), `--database` (default `_system`), `--tls-ca`, and `--insecure`, plus one credential source — `--username` with `--password-env` (add `--auth jwt` to log in at `/_open/auth` instead of resending the password), `--jwt-secret-file`/`--jwt-secret-env` to mint a superuser JWT from the server's secret, or `--auth-token-env` for a token you already hold. Secrets are always read from a file or a named environment variable, never passed on the command line, and supplying two credential sources is an error naming both. See [`docs/authentication.md`](docs/authentication.md).
 
 ```bash
 # Build, then run via cargo (or use the compiled ./target/release/arangox)
@@ -191,6 +200,17 @@ arangox rdf import --database mydb --graph-model rpt \
 **Blank nodes** are only document-scoped in RDF, so `--blank-node-scope` salts blank-node keys to keep identical `_:label`s in different sources distinct. It defaults to the input path (idempotent re-import of the same file, distinct across files); pass an empty string to disable scoping.
 
 The Turtle parser covers a practical subset (prefixes/base, `a`, predicate/object lists, blank-node property lists, collections, and typed/numeric/boolean literals); RDF-star, RDFS/OWL inference, `rdf:type`-based collection bucketing, RDF/XML and TriG, and ArangoDB→RDF export are not (yet) supported. As edges are parsed they stream to a concurrent loader, so only the deduplicated vertices are buffered (under `--named-graph collection` edges are buffered per collection instead).
+
+Declare a named graph over the collections a load just populated, so the final
+step of a migration does not need `arangosh`:
+
+```bash
+arangox graph create --database mydb --name demo \
+  --edge-definition 'orders_to_customers:orders->customers'
+```
+
+Collections named in a definition are created if missing. `--overwrite`
+replaces an existing graph's definition without touching its data.
 
 ### Storage backends
 
