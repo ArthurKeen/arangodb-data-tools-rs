@@ -30,7 +30,7 @@ not captured, so a view that uses one restores without error and then fails at q
 | Core pipeline correctness | A− | Bounded backpressure, deterministic batch-index resume, manifest-last writes; dump refuses clusters by role |
 | Backup completeness | B+ | Collections, indexes, data and search views all round-trip. Custom analyzers are not dumped, so a view using one restores without error but cannot be queried |
 | Interoperability | D | Neither direction of `arangodump`/`arangorestore` compatibility exists; honestly disclosed, but a headline PRD goal |
-| Engineering quality | A | 275 tests green, clippy clean at `-D warnings`, live-server CI, 13.5k lines of Rust across 9 crates |
+| Engineering quality | A | 331 tests green, clippy clean at `-D warnings`, live-server CI. Content-fidelity tests compare restored, exported and imported documents against the source field by field and type by type, not merely by count |
 | Observability | A− | Structured JSON results and NDJSON progress on all five subcommands; retry and server-error counters are now real, and a non-ArangoDB error body (a proxy's HTML page) is surfaced instead of discarded |
 | Security posture | A | Secrets never on argv or in process listings, TLS verified by default, `Secret` blocks `Debug`/`Display`, four explicit auth modes with conflicts refused, and AQL queries and bind variables redacted from `Debug` with a test that fails if the impl is replaced by a derive |
 | Library ergonomics | C+ | Crates are clean and documented, but the typed builders the PRD names as an alpha criterion are not built |
