@@ -11,6 +11,7 @@ use arangodb_import::{
 };
 use arangodb_tools_core::config::{BatchConfig, ConcurrencyConfig};
 use arangodb_tools_core::progress::ProgressSnapshot;
+use arangodb_tools_core::RetryStats;
 use arangodb_tools_core::{Error, Result};
 use clap::{Args, ValueEnum};
 use futures::StreamExt;
@@ -160,7 +161,8 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
         CollectionKind::Document
     };
 
-    let client = args.connection.build_client()?;
+    let retry_stats = Arc::new(RetryStats::new());
+    let client = args.connection.build_client_with_stats(&retry_stats)?;
 
     if args.create_collection {
         client.ensure_collection(&args.collection, kind).await?;
@@ -241,8 +243,11 @@ pub(crate) async fn run(args: ImportArgs, reporter: Reporter) -> Result<()> {
         bytes_written: summary.bytes_sent,
         documents: summary.documents_sent,
         batches: summary.batches,
-        server_errors: summary.errors,
-        retries: 0,
+        // Server-reported errors come from the import summary, which counts
+        // per-document rejections the retry loop never sees; retries come from
+        // the retry loop, which is the only place that knows it retried.
+        server_errors: summary.errors + retry_stats.server_errors(),
+        retries: retry_stats.retries(),
         elapsed_secs,
     });
 
